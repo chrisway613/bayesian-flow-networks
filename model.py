@@ -202,6 +202,11 @@ class CtsBayesianFlow(BayesianFlow):
 
 
 class CtsBayesianFlowLoss(Loss):
+    """建模连续/离散化数据场景时所用的损失函数, 包括：
+    -离散时间损失函数;
+    -连续时间损失函数;
+    -重构损失"""
+    
     def __init__(
         self,
         bayesian_flow: CtsBayesianFlow,
@@ -210,55 +215,90 @@ class CtsBayesianFlowLoss(Loss):
         noise_pred: bool = True,
     ):
         super().__init__()
+        
         self.bayesian_flow = bayesian_flow
         self.distribution_factory = distribution_factory
+        # \sigma_1^{2t} 的下限, 以防用作分母时溢出.
         self.min_loss_variance = min_loss_variance
+        # -ln(\sigma_1)
         self.C = -0.5 * math.log(bayesian_flow.min_variance)
+        
+        # 是否预测噪声向量(在离散化数据的场景下, 预测的是噪声分布的均值向量与标准差的对数).
         self.noise_pred = noise_pred
         if self.noise_pred:
             self.distribution_factory.log_dev = False
+            # TODO
             self.distribution_factory = PredDistToDataDistFactory(
                 self.distribution_factory, self.bayesian_flow.min_variance
             )
 
     def cts_time_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor, t) -> Tensor:
+        # reshape
         output_params = sandwich(output_params)
+        
         t = t.flatten(start_dim=1).float()
-        posterior_var = torch.pow(self.bayesian_flow.min_variance, t)
         flat_target = data.flatten(start_dim=1)
-        pred_dist = self.distribution_factory.get_dist(output_params, input_params, t)
-        pred_mean = pred_dist.mean
-        mse_loss = (pred_mean - flat_target).square()
+        
+        # \sigma_1^{2t}
+        posterior_var = torch.pow(self.bayesian_flow.min_variance, t)
         if self.min_loss_variance > 0:
+            # 做最小值截断, 以防其作分母时防止溢出
             posterior_var = posterior_var.clamp(min=self.min_loss_variance)
+        
+        # 接收者分布
+        pred_dist = self.distribution_factory.get_dist(output_params, input_params, t)
+        # 接收者分布的均值 E[P(\theta, t)], 作为对真实数据的估计
+        pred_mean = pred_dist.mean
+        
+        mse_loss = (pred_mean - flat_target).square()
+        # 连续时间的损失函数计算公式: -ln(\sigma_1) \sigma_1{-2t} || x - \hat{x}(\theta, t) ||^2
         loss = self.C * mse_loss / posterior_var
+        
         return loss
 
     def discrete_time_loss(
-        self, data: Tensor, output_params: Tensor, input_params: Tensor, t: Tensor, n_steps: int, n_samples=10
+        self, data: Tensor,
+        output_params: Tensor, input_params: Tensor,
+        t: Tensor, n_steps: int, n_samples=10
     ) -> Tensor:
+        # reshape
         output_params = sandwich(output_params)
         t = t.flatten(start_dim=1).float()
+        
         output_dist = self.distribution_factory.get_dist(output_params, input_params, t)
+
+        # 离散化数据的场景
         if hasattr(output_dist, "probs"):  # output distribution is discretized normal
-            flat_target = data.flatten(start_dim=1)
             t = t.flatten(start_dim=1)
             i = t * n_steps + 1  # since t = (i - 1) / n
+            
             alpha = self.bayesian_flow.get_alpha(i, n_steps)
+            
+            flat_target = data.flatten(start_dim=1)
+            # 发送者分布
             sender_dist = self.bayesian_flow.get_sender_dist(flat_target, alpha)
+            # 因为使用蒙特卡洛方法来估计发送者分布与接收者分布之间的 KL 散度，所以要从发送者分布中采样观测样本 y
+            y = sender_dist.sample(torch.Size([n_samples]))
+            
+            # 模型输出的分配到各离散化区间的概率值.
             receiver_mix_wts = sandwich(output_dist.probs)
+            # 输出分布是类别分布, 在每个离散化区间都分配一定概率.
             receiver_mix_dist = D.Categorical(probs=receiver_mix_wts, validate_args=False)
+            # 以各离散化区间的中心为均值构造多个高斯分布，其中每个都与发送者分布的形式一致(噪声强度相等, 即方差一致).
             receiver_components = D.Normal(
                 output_dist.class_centres, (1.0 / alpha.sqrt()).unsqueeze(-1), validate_args=False
             )
+            # 接收者分布, 在数据的每个维度上都是混合高斯分布.
             receiver_dist = D.MixtureSameFamily(receiver_mix_dist, receiver_components, validate_args=False)
-            y = sender_dist.sample(torch.Size([n_samples]))
+            
+            # (B,1)
             loss = (
-                (sender_dist.log_prob(y) - receiver_dist.log_prob(y))
-                .mean(0)
+                (sender_dist.log_prob(y) - receiver_dist.log_prob(y))  # 发送者分布和接收者分布的概率密度对数差
+                .mean(0)  # 在蒙特卡洛采样的样本数上做平均
                 .flatten(start_dim=1)
                 .mean(1, keepdims=True)
             )
+        # 连续数据的场景
         else:  # output distribution is normal
             pred_mean = output_dist.mean
             flat_target = data.flatten(start_dim=1)
@@ -266,14 +306,16 @@ class CtsBayesianFlowLoss(Loss):
             i = t * n_steps + 1
             alpha = self.bayesian_flow.get_alpha(i, n_steps)
             loss = alpha * mse_loss / 2
+            
         return n_steps * loss
 
     def reconstruction_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor) -> Tensor:
         output_params = sandwich(output_params)
         flat_data = data.flatten(start_dim=1)
+        # 重构损失只发生在最后时刻，于是 t=1.
         t = torch.ones_like(data).flatten(start_dim=1).float()
         output_dist = self.distribution_factory.get_dist(output_params, input_params, t)
-
+        
         if hasattr(output_dist, "probs"):  # output distribution is discretized normal
             reconstruction_loss = -output_dist.log_prob(flat_data)
         else:  # output distribution is normal, but we use discretized normal to make results comparable (see Sec. 7.2)
@@ -283,10 +325,13 @@ class CtsBayesianFlowLoss(Loss):
             else:
                 noise_dev = math.sqrt(self.bayesian_flow.min_variance)
                 num_bins = 256
+                
             mean = output_dist.mean.flatten(start_dim=1)
             final_dist = D.Normal(mean, noise_dev)
+            # TODO
             final_dist = DiscretizedCtsDistribution(final_dist, num_bins, device=t.device, batch_dims=mean.ndim - 1)
             reconstruction_loss = -final_dist.log_prob(flat_data)
+            
         return reconstruction_loss
 
 
