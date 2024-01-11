@@ -327,6 +327,7 @@ class GMMFactory(CtsDistributionFactory):
         if self.log_dev:
             std_devs = safe_exp(std_devs)
         std_devs = std_devs.clamp(min=self.min_std_dev, max=self.max_std_dev)
+        
         return GMM(mix_wt_logits, means, std_devs)
 
 
@@ -338,6 +339,7 @@ class NormalFactory(CtsDistributionFactory):
     def get_dist(self, params, input_params=None, t=None):
         mean, log_std_dev = params.split(1, -1)[:2]
         std_dev = safe_exp(log_std_dev).clamp(min=self.min_std_dev, max=self.max_std_dev)
+        
         return Normal(mean.squeeze(-1), std_dev.squeeze(-1), validate_args=False)
 
 

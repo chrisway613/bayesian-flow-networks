@@ -280,7 +280,8 @@ class CtsBayesianFlowLoss(Loss):
             # 因为使用蒙特卡洛方法来估计发送者分布与接收者分布之间的 KL 散度，所以要从发送者分布中采样观测样本 y
             y = sender_dist.sample(torch.Size([n_samples]))
             
-            # 模型输出的分配到各离散化区间的概率值.
+            # 模型输出的分配到各离散化区间的概率值. 
+            # TODO: 搞清楚 shape
             receiver_mix_wts = sandwich(output_dist.probs)
             # 输出分布是类别分布, 在每个离散化区间都分配一定概率.
             receiver_mix_dist = D.Categorical(probs=receiver_mix_wts, validate_args=False)
