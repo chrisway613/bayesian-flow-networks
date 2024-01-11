@@ -15,9 +15,10 @@
 """
 This file implements the Bayesian Flow and BFN loss for continuous and discrete variables.
 Finally it implements the BFN using these objects.
+
 For consistency we use always use a tuple to store input parameters.
 It has just one element for discrete data (the probabilities) and two for continuous/discretized (mean & variance).
-The probability distributions and network architectures are defined in probability.py and networks dir.
+The probability distributions and network architectures are defined in 'probability.py' and 'networks dir/'.
 "Cts" is an abbreviation of "Continuous".
 """
 
@@ -47,32 +48,42 @@ class BayesianFlow(nn.Module, ABC):
     def get_prior_input_params(self, data_shape: tuple, device: torch.device) -> tuple[Tensor, ...]:
         """Returns the initial input params (for a batch) at t=0. Used during sampling.
         For discrete data, the tuple has length 1 and contains the initial class probabilities.
-        For continuous data, the tuple has length 2 and contains the mean and precision."""
+        For continuous data, the tuple has length 2 and contains the mean and precision.
+        
+        返回起始时刻 t=0 的先验参数, 这些参数会作为模型的输入, 这个方法用于采样过程."""
         pass
 
     @abstractmethod
     def params_to_net_inputs(self, params: tuple[Tensor, ...]) -> Tensor:
-        """Utility method to convert input distribution params to network inputs if needed."""
+        """Utility method to convert input distribution params to network inputs if needed.
+        
+        如果有必要的话, 将输入分布的参数转换为适合模型输入的形式."""
         pass
 
     @abstractmethod
     def get_alpha(self, i: Union[int, Tensor], n_steps: int) -> float:
         """Returns the alpha at step i of total n_steps according to the flow schedule. Used:
         a) during sampling, when i and alpha are the same for all samples in the batch.
-        b) during discrete time loss computation, when i and alpha are different for samples in the batch."""
+        b) during discrete time loss computation, when i and alpha are different for samples in the batch.
+        
+        计算离散时间步的 \alpha_i, 用于采样过程或离散时间的损失函数. """
         pass
 
     @abstractmethod
     def get_sender_dist(self, x: Tensor, alpha: Union[float, Tensor], shape=torch.Size([])) -> D.Distribution:
         """Returns the sender distribution with accuracy alpha obtained by adding appropriate noise to the data x. Used:
         a) during sampling (same alpha for whole batch) to sample from the output distribution produced by the net.
-        b) during discrete time loss computation when alpha are different for samples in the batch."""
+        b) during discrete time loss computation when alpha are different for samples in the batch.
+        
+        计算输入分布. """
         pass
 
     @abstractmethod
     def update_input_params(self, input_params: tuple[Tensor, ...], y: Tensor, alpha: float) -> tuple[Tensor, ...]:
         """Updates the distribution parameters using Bayes' theorem in light of noisy sample y.
-        Used during sampling when alpha is the same for the whole batch."""
+        Used during sampling when alpha is the same for the whole batch.
+        
+        利用观测样本 y 进行计算出后验, 从而更新先验. """
         pass
 
     @abstractmethod
@@ -80,7 +91,9 @@ class BayesianFlow(nn.Module, ABC):
         """Returns a sample from the Bayesian Flow distribution over input parameters at time t conditioned on data.
         Used during training when t (and thus accuracies) are different for different samples in the batch.
         For discrete data, the returned tuple has length 1 and contains the class probabilities.
-        For continuous data, the returned tuple has length 2 and contains the mean and precision."""
+        For continuous data, the returned tuple has length 2 and contains the mean and precision.
+        
+        从贝叶斯流分布中采样, 返回采样结果(也就是经过后验更新后的输入分布参数). """
         pass
 
 
@@ -91,29 +104,39 @@ class Loss(nn.Module, ABC):
     @abstractmethod
     def cts_time_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor, t: Tensor) -> Tensor:
         """Returns the continuous time KL loss (and any other losses) at time t (between 0 and 1).
-        The input params are only used when the network is parameterized to predict the noise for continuous data."""
+        The input params are only used when the network is parameterized to predict the noise for continuous data.
+        
+        连续时间的损失函数. """
         pass
 
     @abstractmethod
     def discrete_time_loss(
-        self, data: Tensor, output_params: Tensor, input_params: Tensor, t: Tensor, n_steps: int, n_samples: int = 20
+        self, data: Tensor,
+        output_params: Tensor, input_params: Tensor,
+        t: Tensor, n_steps: int, n_samples: int = 20
     ) -> Tensor:
         """Returns the discrete time KL loss for n_steps total of communication at time t (between 0 and 1) using
         n_samples for Monte Carlo estimation of the discrete loss.
-        The input params are only used when the network is parameterized to predict the noise for continuous data."""
+        The input params are only used when the network is parameterized to predict the noise for continuous data.
+        
+        离散时间的损失函数, 当所需计算的 KL 散度没有解析形式时, 使用蒙特卡洛方法来近似估计. """
         pass
 
     @abstractmethod
     def reconstruction_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor) -> Tensor:
         """Returns the reconstruction loss, i.e. the final cost of transmitting clean data.
-        The input params are only used when the network is parameterized to predict the noise for continuous data."""
+        The input params are only used when the network is parameterized to predict the noise for continuous data.
+        
+        重构损失, 不参与训练. """
         pass
 
 
-# Continuous or Discretized data
+## Continuous or Discretized data ##
 
 
 class CtsBayesianFlow(BayesianFlow):
+    """建模连续/离散化数据的贝叶斯流."""
+    
     def __init__(
         self,
         min_variance: float = 1e-6,
@@ -123,35 +146,58 @@ class CtsBayesianFlow(BayesianFlow):
 
     @torch.no_grad()
     def forward(self, data: Tensor, t: Tensor) -> tuple[Tensor, None]:
+        """返回贝叶斯流分布的采样结果, 即经过后验更新的输入分布的均值向量: \mu."""
+        
+        # \omega_1^{2t}
         post_var = torch.pow(self.min_variance, t)
+        # \gamma(t)
         alpha_t = 1 - post_var
-        mean_mean = alpha_t * data
+        # \gamma(t)(1-\gamma(t))
         mean_var = alpha_t * post_var
+        
+        # 贝叶斯流分布的均值: \gamma(t)x
+        mean_mean = alpha_t * data
+        # 贝叶斯流分布的标准差: \sqrt{\gamma(t)(1-\gamma(t))}
         mean_std_dev = mean_var.sqrt()
+        
+        # 标准高斯噪声
         noise = torch.randn(mean_mean.shape, device=mean_mean.device)
+        # 利用重参数化技术构造贝叶斯流分布的样本
         mean = mean_mean + (mean_std_dev * noise)
+        
         # We don't need to compute the variance because it is not needed by the network, so set it to None
         input_params = (mean, None)
+        
         return input_params
 
     def params_to_net_inputs(self, params: tuple[Tensor]) -> Tensor:
-        return params[0]  # Only the mean is used by the network
+        # 仅取输入分布的均值向量作为 BFN 的输入
+        # Only the mean is used by the network
+        return params[0]
 
     def get_prior_input_params(self, data_shape: tuple, device: torch.device) -> tuple[Tensor, float]:
+        # 起始时刻的先验是标准高斯分布, 均值为0, 方差为1(协方差矩阵是对角元均为1的对角阵)
         return torch.zeros(*data_shape, device=device), 1.0
 
     def get_alpha(self, i: Union[int, Tensor], n_steps: int) -> Union[float, Tensor]:
+        # 根据 \beta(t_i) - \beta(t_{i-1}) 计算, 其中 t_i = \frac{i}{n}.
         sigma_1 = math.sqrt(self.min_variance)
         return (sigma_1 ** (-2 * i / n_steps)) * (1 - sigma_1 ** (2 / n_steps))
 
     def get_sender_dist(self, x: Tensor, alpha: Union[float, Tensor], shape=torch.Size([])) -> D.Distribution:
+        # 返回输入分布, 精度 \alpha 是方差的倒数.
         dist = D.Normal(x, 1.0 / alpha**0.5)
         return dist
 
     def update_input_params(self, input_params: tuple[Tensor, float], y: Tensor, alpha: float) -> tuple[Tensor, float]:
+        """贝叶斯更新函数, 对输入分布的参数进行后验更新."""
+        
         input_mean, input_precision = input_params
+        # \rho_i = \rho_{i-1} + \alpha
         new_precision = input_precision + alpha
+        # 根据贝叶斯定理计算: \mu_i = \frac{ \rho_{i-1} \mu_{i-1} + \alpha y }{\rho_i}
         new_mean = ((input_precision * input_mean) + (alpha * y)) / new_precision
+        
         return new_mean, new_precision
 
 
@@ -244,7 +290,7 @@ class CtsBayesianFlowLoss(Loss):
         return reconstruction_loss
 
 
-# Discrete Data
+## Discrete Data ##
 
 
 class DiscreteBayesianFlow(BayesianFlow):
