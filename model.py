@@ -223,11 +223,11 @@ class CtsBayesianFlowLoss(Loss):
         # -ln(\sigma_1)
         self.C = -0.5 * math.log(bayesian_flow.min_variance)
         
-        # 是否预测噪声向量(在离散化数据的场景下, 预测的是噪声分布的均值向量与标准差的对数).
+        # 是否预测噪声(亦或是直接预测数据)
         self.noise_pred = noise_pred
         if self.noise_pred:
             self.distribution_factory.log_dev = False
-            # TODO
+            # 在预测噪声的情况下, 将预测的噪声分布的参数转换为对应数据分布的参数，从而得到对应的数据分布.
             self.distribution_factory = PredDistToDataDistFactory(
                 self.distribution_factory, self.bayesian_flow.min_variance
             )
@@ -281,11 +281,11 @@ class CtsBayesianFlowLoss(Loss):
             y = sender_dist.sample(torch.Size([n_samples]))
             
             # 模型输出的分配到各离散化区间的概率值. 
-            # TODO: 搞清楚 shape
+            #(B,D,K)
             receiver_mix_wts = sandwich(output_dist.probs)
             # 输出分布是类别分布, 在每个离散化区间都分配一定概率.
             receiver_mix_dist = D.Categorical(probs=receiver_mix_wts, validate_args=False)
-            # 以各离散化区间的中心为均值构造多个高斯分布，其中每个都与发送者分布的形式一致(噪声强度相等, 即方差一致).
+            # 以各离散化区间的中心为均值构造多个一维高斯分布，其中每个都与发送者分布的形式一致(噪声强度相等, 即方差一致).\
             receiver_components = D.Normal(
                 output_dist.class_centres, (1.0 / alpha.sqrt()).unsqueeze(-1), validate_args=False
             )
@@ -313,6 +313,7 @@ class CtsBayesianFlowLoss(Loss):
     def reconstruction_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor) -> Tensor:
         output_params = sandwich(output_params)
         flat_data = data.flatten(start_dim=1)
+        
         # 重构损失只发生在最后时刻，于是 t=1.
         t = torch.ones_like(data).flatten(start_dim=1).float()
         output_dist = self.distribution_factory.get_dist(output_params, input_params, t)
@@ -329,7 +330,7 @@ class CtsBayesianFlowLoss(Loss):
                 
             mean = output_dist.mean.flatten(start_dim=1)
             final_dist = D.Normal(mean, noise_dev)
-            # TODO
+            # 离散化的正态分布
             final_dist = DiscretizedCtsDistribution(final_dist, num_bins, device=t.device, batch_dims=mean.ndim - 1)
             reconstruction_loss = -final_dist.log_prob(flat_data)
             
@@ -465,9 +466,13 @@ class DiscreteBayesianFlowLoss(Loss):
         return -output_dist.log_prob(flat_data)
 
 
+## Model ##
+
+
 class BFN(nn.Module):
     def __init__(self, net: nn.Module, bayesian_flow: BayesianFlow, loss: Loss):
         super().__init__()
+        
         self.net = net
         self.bayesian_flow = bayesian_flow
         self.loss = loss
@@ -475,11 +480,20 @@ class BFN(nn.Module):
     @staticmethod
     @torch.no_grad()
     def sample_t(data: Tensor, n_steps: Optional[int]) -> Tensor:
+        """采样时间变量 t, 包括连续时间和离散时间两种情况."""
+        
+        # 连续时间情况不需要指定总步数, 从 U(0,1) 连续型均匀分布中采样.
         if n_steps == 0 or n_steps is None:
+            # (B,1)
             t = torch.rand(data.size(0), device=data.device).unsqueeze(-1)
+        # 离散时间情况则先从 U{0,n-1} 离散型均匀分布采样出时间步，然后再除总步数 n 计算出对应的时间变量值: t = \frac{i-1}{n}
+        # 注意, 这是每个区间起始时刻的值.
         else:
+            # (B,1)
             t = torch.randint(0, n_steps, (data.size(0),), device=data.device).unsqueeze(-1) / n_steps
+        # 扩展至和数据同样的维度, 不同的数据样本的时间变量不一致, 同一个样本内所有维度上所对应的时间变量则相同.
         t = (torch.ones_like(data).flatten(start_dim=1) * t).reshape_as(data)
+        
         return t
 
     def forward(
@@ -488,14 +502,25 @@ class BFN(nn.Module):
         """
         Compute an MC estimate of the continuous (when n_steps=None or 0) or discrete time KL loss.
         t is sampled randomly if None. If t is not None, expect t.shape == data.shape.
+        
+        使用蒙特卡洛方法估计发送者分布和接收者分布之间的 KL 散度损失:
+        -采样时间变量;
+        -从贝叶斯流分布中采样得到输入分布的参数(后验更新);
+        -将输入分布的参数喂给模型;
+        -模型输出形成输出分布;
+        -计算连续/离散时间 loss.
         """
 
         t = self.sample_t(data, n_steps) if t is None else t
+        
         # sample input parameter flow
+        # 从贝叶斯流分布中采样出输入分布的参数(代表已完成后验更新).
         input_params = self.bayesian_flow(data, t)
+        # 在输入模型前转换为适合于模型输入的形式(如有必要的话)
         net_inputs = self.bayesian_flow.params_to_net_inputs(input_params)
-
         # compute output distribution parameters
+        # 注意, 这里模型输出的通常不是输出分布的参数, 而是某些变量(比如估计的噪声),
+        # 它们经过后处理才最终成为输出分布的参数.
         output_params: Tensor = self.net(net_inputs, t)
 
         # compute KL loss in float32
@@ -510,29 +535,43 @@ class BFN(nn.Module):
 
     @torch.inference_mode()
     def compute_reconstruction_loss(self, data: Tensor) -> Tensor:
+        """计算重构损失, 仅当作指标, 不参与训练."""
+        
+        # 重构损失仅发生在最后时刻 t=1
         t = torch.ones_like(data).float()
         input_params = self.bayesian_flow(data, t)
         net_inputs = self.bayesian_flow.params_to_net_inputs(input_params)
         output_params: Tensor = self.net(net_inputs, t)
+        
         return self.loss.reconstruction_loss(data, output_params, input_params).flatten(start_dim=1).mean()
 
     @torch.inference_mode()
     def sample(self, data_shape: tuple, n_steps: int) -> Tensor:
         device = next(self.parameters()).device
+        
+        # 起始时刻的先验
         input_params = self.bayesian_flow.get_prior_input_params(data_shape, device)
         distribution_factory = self.loss.distribution_factory
 
         for i in range(1, n_steps):
+            # t_{i-1} = \frac{i-1}{n}
             t = torch.ones(*data_shape, device=device) * (i - 1) / n_steps
+            
+            # 模型接收输入分布的参数并预测，形成输出分布的参数后，再从其中采样作为预测(生成)的数据样本.
             output_params = self.net(self.bayesian_flow.params_to_net_inputs(input_params), t)
             output_sample = distribution_factory.get_dist(output_params, input_params, t).sample()
             output_sample = output_sample.reshape(*data_shape)
+            
+            # 计算精度 \alpha_i
             alpha = self.bayesian_flow.get_alpha(i, n_steps)
+            # 采样观测样本
             y = self.bayesian_flow.get_sender_dist(output_sample, alpha).sample()
+            # 后验更新
             input_params = self.bayesian_flow.update_input_params(input_params, y, alpha)
 
         t = torch.ones(*data_shape, device=device)
         output_params = self.net(self.bayesian_flow.params_to_net_inputs(input_params), t)
         output_sample = distribution_factory.get_dist(output_params, input_params, t).mode
         output_sample = output_sample.reshape(*data_shape)
+        
         return output_sample

@@ -38,16 +38,23 @@ def safe_exp(data: Tensor):
 
 
 def idx_to_float(idx: np.ndarray, num_bins: int):
+    """将离散化区间索引 k 转换为对应的区间中心值 k_c.
+    注意, 此处 k 的取值范围与论文中的不同, 论文中 k 的取值范围是 1~K, 而这里:
+    k_c = \frac{2k+1}{K} - 1, where k \in [0, K-1]."""
+    
     flt_zero_one = (idx + 0.5) / num_bins
     return (2.0 * flt_zero_one) - 1.0
 
 
 def float_to_idx(flt: np.ndarray, num_bins: int):
+    """根据离散化值 k_c 计算出对应的区间索引 k, 是 float_to_idx() 的逆向操作."""
+    
     flt_zero_one = (flt / 2.0) + 0.5
     return torch.clamp(torch.floor(flt_zero_one * num_bins), min=0, max=num_bins - 1).long()
 
 
 def quantize(flt, num_bins: int):
+    """将浮点值量化以对应的离散化区间中点 k_c 表示, 因此看作是一个量化的过程."""
     return idx_to_float(float_to_idx(flt, num_bins), num_bins)
 
 

@@ -96,8 +96,11 @@ class DiscretizedDistribution(DiscreteDistribution):
 
 
 class DiscretizedCtsDistribution(DiscretizedDistribution):
+    """将一个连续型分布离散化."""
+    
     def __init__(self, cts_dist, num_bins, device, batch_dims, clip=True, min_prob=1e-5):
         super().__init__(num_bins, device)
+        
         self.cts_dist = cts_dist
         self.log_bin_width = log(self.bin_width)
         self.batch_dims = batch_dims
@@ -108,11 +111,15 @@ class DiscretizedCtsDistribution(DiscretizedDistribution):
     def probs(self):
         bdry_cdfs = self.cts_dist.cdf(self.class_boundaries.reshape([-1] + ([1] * self.batch_dims)))
         bdry_slice = bdry_cdfs[:1]
+        
+        # 先对 CDF 做截断再计算每个区间的概率
         if self.clip:
             cdf_min = torch.zeros_like(bdry_slice)
             cdf_max = torch.ones_like(bdry_slice)
             bdry_cdfs = torch.cat([cdf_min, bdry_cdfs, cdf_max], 0)
+            
             return (bdry_cdfs[1:] - bdry_cdfs[:-1]).moveaxis(0, -1)
+        # 直接先计算各区间概率再按照有效取值范围进行缩放
         else:
             cdf_min = self.cts_dist.cdf(torch.zeros_like(bdry_slice) - 1)
             cdf_max = self.cts_dist.cdf(torch.ones_like(bdry_slice))
@@ -122,43 +129,66 @@ class DiscretizedCtsDistribution(DiscretizedDistribution):
             cdf_range = torch.where(cdf_mask, (cdf_range * 0) + 1, cdf_range)
             probs = (bdry_cdfs[1:] - bdry_cdfs[:-1]) / cdf_range
             probs = torch.where(cdf_mask, (probs * 0) + (1 / self.num_bins), probs)
+            
             return probs.moveaxis(0, -1)
 
     def prob(self, x):
+        # 区间索引 k \in [0, K-1]
         class_idx = float_to_idx(x, self.num_bins)
+        # 区间中心 k_c
         centre = idx_to_float(class_idx, self.num_bins)
+        # CDF(k_l), 其中 k_l 代表区间左端点.
         cdf_lo = self.cts_dist.cdf(centre - self.half_bin_width)
+        # CDF(k_r), 其中 k_r 代表区间右端点.
         cdf_hi = self.cts_dist.cdf(centre + self.half_bin_width)
+        
+        # 对原来连续分布的 CDF 做截断, 使得:
+        # CDF(k <= 0) = 0;
+        # CDF(k >= K-1) = 1
         if self.clip:
             cdf_lo = torch.where(class_idx <= 0, torch.zeros_like(centre), cdf_lo)
             cdf_hi = torch.where(class_idx >= (self.num_bins - 1), torch.ones_like(centre), cdf_hi)
+            
             return cdf_hi - cdf_lo
         else:
+            # 有效的样本值范围为 [-1, 1], 于是计算对应的有效 CDF 范围.
             cdf_min = self.cts_dist.cdf(torch.zeros_like(centre) - 1)
             cdf_max = self.cts_dist.cdf(torch.ones_like(centre))
             cdf_range = cdf_max - cdf_min
+            # 若有效 CDF 范围小于预设的最小概率，则设置 mask，并将此范围的概率以1代替，即不进行缩放, 否则会使得计算出来的采样概率非常接近于1.
+            # 试想两个非常小的值相除, 因为它们都很小，非常接近，因此商接近于1.
             cdf_mask = cdf_range < self.min_prob
             cdf_range = torch.where(cdf_mask, (cdf_range * 0) + 1, cdf_range)
             prob = (cdf_hi - cdf_lo) / cdf_range
+            
+            # 将 mask 部分以均匀采样的概率值即 1/K 代替.
             return torch.where(cdf_mask, (prob * 0) + (1 / self.num_bins), prob)
 
     def log_prob(self, x):
         prob = self.prob(x)
         return torch.where(
             prob < self.min_prob,
+            # 将 x 以对应区间的中点 k_c 表示并计算出其在原来连续分布中的对数概率密度: log(p(k_c)).
+            # 这里加上 log(2/K) 相当于将 k_c 乘以 2/K 再取对数.
             self.cts_dist.log_prob(quantize(x, self.num_bins)) + self.log_bin_width,
             safe_log(prob),
         )
 
     def sample(self, sample_shape=torch.Size([])):
         if self.clip:
+            # 采取截断的方式, 即直接从原来的连续分布中采样, 然后将其截断至对应的离散化区间.
             return quantize(self.cts_dist.sample(sample_shape), self.num_bins)
         else:
+            # 要求连续分布的 CDF 的反函数存在, 即可以根据概率值逆向求出对应的样本.
             assert hasattr(self.cts_dist, "icdf")
+            
+            # 由于作者将数据归一化至 [-1, 1] 范围内，因此将 CDF 截断至该范围, 
+            # 然后随机抽取该范围内的一个概率值并利用 CDF 的反函数逆向求出对应的样本.
             cdf_min = self.cts_dist.cdf(torch.zeros_like(self.cts_dist.mean) - 1)
             cdf_max = self.cts_dist.cdf(torch.ones_like(cdf_min))
             u = Uniform(cdf_min, cdf_max, validate_args=False).sample(sample_shape)
             cts_samp = self.cts_dist.icdf(u)
+            
             return quantize(cts_samp, self.num_bins)
 
 
@@ -421,38 +451,54 @@ class DiscretizedNormalFactory(DiscreteDistributionFactory):
 
 
 def noise_pred_params_to_data_pred_params(noise_pred_params: torch.Tensor, input_mean: torch.Tensor, t: torch.Tensor, min_variance: float, min_t=1e-6):
-    """Convert output parameters that predict the noise added to data, to parameters that predict the data."""
+    """Convert output parameters that predict the noise added to data, to parameters that predict the data.
+    将模型预测的噪声分布的参数转换为数据分布的参数."""
+    
     data_shape = list(noise_pred_params.shape)[:-1]
     noise_pred_params = sandwich(noise_pred_params)
     input_mean = input_mean.flatten(start_dim=1)
+    
     if torch.is_tensor(t):
         t = t.flatten(start_dim=1)
     else:
         t = (input_mean * 0) + t
+        
     alpha_mask = (t < min_t).unsqueeze(-1)
+    
+    # \sigma_1^{2t}
     posterior_var = torch.pow(min_variance, t.clamp(min=min_t))
+    # \gamma(t) = 1 - \sigma_1^{2t}
     gamma = 1 - posterior_var
+    
     A = (input_mean / gamma).unsqueeze(-1)
     B = (posterior_var / gamma).sqrt().unsqueeze(-1)
+    
     data_pred_params = []
+    
+    # 对应建模连续数据的场景: 模型预测的是噪声向量.
     if noise_pred_params.size(-1) == 1:
         noise_pred_mean = noise_pred_params
+    # 对应建模离散化数据的场景: 模型预测的是噪声分布的均值与对数标准差. 
     elif noise_pred_params.size(-1) == 2:
         noise_pred_mean, noise_pred_log_dev = noise_pred_params.chunk(2, -1)
     else:
         assert noise_pred_params.size(-1) % 3 == 0
         mix_wt_logits, noise_pred_mean, noise_pred_log_dev = noise_pred_params.chunk(3, -1)
         data_pred_params.append(mix_wt_logits)
+        
     data_pred_mean = A - (B * noise_pred_mean)
     data_pred_mean = torch.where(alpha_mask, 0 * data_pred_mean, data_pred_mean)
     data_pred_params.append(data_pred_mean)
+    
     if noise_pred_params.size(-1) >= 2:
         noise_pred_dev = safe_exp(noise_pred_log_dev)
         data_pred_dev = B * noise_pred_dev
         data_pred_dev = torch.where(alpha_mask, 1 + (0 * data_pred_dev), data_pred_dev)
         data_pred_params.append(data_pred_dev)
+        
     data_pred_params = torch.cat(data_pred_params, -1)
     data_pred_params = data_pred_params.reshape(data_shape + [-1])
+    
     return data_pred_params
 
 
