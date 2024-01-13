@@ -17,6 +17,7 @@ from omegaconf import OmegaConf, DictConfig
 
 from utils_train import seed_everything, make_config, make_bfn
 
+
 torch.set_float32_matmul_precision("high")
 torch.backends.cudnn.benchmark = True
 
@@ -24,9 +25,9 @@ torch.backends.cudnn.benchmark = True
 def main(cfg: DictConfig) -> torch.Tensor:
     """
     Config entries:
-        seed (int): Optional
-        config_file (str): Name of config file containing model and data config for a saved checkpoint
-        load_model (str): Path to a saved checkpoint to be tested
+        seed (int): Optional.
+        config_file (str): Name of config file containing model and data config for a saved checkpoint.
+        load_model (str): Path to a saved checkpoint to be tested.
         sample_shape (list): Shape of sample batch, e.g.:
             (3, 256) for sampling 3 sequences of length 256 from the text8 model.
             (2, 3, 32, 32) for sampling 2 images from the CIFAR10 model.
@@ -34,16 +35,18 @@ def main(cfg: DictConfig) -> torch.Tensor:
         n_steps (int): Number of sampling steps (positive integer).
         save_file (str): File path to save the generated sample tensor. Skip saving if None.
     """
+    
     seed_everything(cfg.seed)
     print(f"Seeded everything with seed {cfg.seed}")
 
     # Get model config from the training config file
     train_cfg = make_config(cfg.config_file)
+    
     bfn = make_bfn(train_cfg.model)
-
     bfn.load_state_dict(torch.load(cfg.load_model, weights_only=True, map_location="cpu"))
     if torch.cuda.is_available():
         bfn.to("cuda")
+        
     samples = bfn.sample(cfg.samples_shape, cfg.n_steps)
 
     if cfg.save_file is not None:

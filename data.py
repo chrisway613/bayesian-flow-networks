@@ -43,6 +43,7 @@ def bin_mnist_cts_transform(x):
 
 
 def rgb_image_transform(x, num_bins=256):
+    """将 RGB 图像进行离散化, 其中 x \in [0,1]"""
     return quantize((x * 2) - 1, num_bins).permute(1, 2, 0).contiguous()
 
 
@@ -71,14 +72,18 @@ def make_datasets(cfg: DictConfig) -> tuple[Dataset, Dataset, Dataset]:
     Optional for vision: num_bins (default 256), val_frac (default 0.01), horizontal_flip (default: False)
     Mandatory for text: seq_len
     """
+    
     num_bins = cfg.get("num_bins", 256)
+    
     if cfg.dataset == "cifar10":
         train_transform_list = [transforms.ToTensor()]
         if cfg.get("horizontal_flip", False):
             train_transform_list.append(transforms.RandomHorizontalFlip())
         train_transform_list.append(MyLambda(rgb_image_transform, num_bins))
         train_transform = transforms.Compose(train_transform_list)
+        
         test_transform = transforms.Compose([transforms.ToTensor(), MyLambda(rgb_image_transform, num_bins)])
+        
         train_set = CIFAR10(root=cfg.data_dir, train=True, download=True, transform=train_transform)
         val_set = CIFAR10(root=cfg.data_dir, train=True, download=True, transform=test_transform)
         test_set = CIFAR10(root=cfg.data_dir, train=False, download=True, transform=test_transform)
