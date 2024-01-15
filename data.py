@@ -95,12 +95,14 @@ def make_datasets(cfg: DictConfig) -> tuple[Dataset, Dataset, Dataset]:
                 MyLambda(rgb_image_transform, num_bins),
             ]
         )
+        
         train_set = MNIST(root=cfg.data_dir, train=True, download=True, transform=transform)
         val_set = MNIST(root=cfg.data_dir, train=True, download=True, transform=transform)
         test_set = MNIST(root=cfg.data_dir, train=False, download=True, transform=transform)
 
     elif cfg.dataset == "bin_mnist":
         transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(bin_mnist_transform)])
+        
         train_set = MNIST(root=cfg.data_dir, train=True, download=True, transform=transform)
         val_set = MNIST(root=cfg.data_dir, train=True, download=True, transform=transform)
         test_set = MNIST(root=cfg.data_dir, train=False, download=True, transform=transform)
@@ -120,8 +122,12 @@ def make_datasets(cfg: DictConfig) -> tuple[Dataset, Dataset, Dataset]:
 
     if cfg.dataset != "text8":
         # For vision datasets we split the train set into train and val
+        # 因为上面划分的 train_set 和 val_set 实际上都是训练集，只不过应用了不同的 transforms,
+        # 所以这里需要按比例从训练集中真正划分出验证集.
         val_frac = cfg.get("val_frac", 0.01)
         train_val_split = [1.0 - val_frac, val_frac]
+        
+        # 固定随机种子使得两个 random_split 划分的结果一致, 这样 train_set 和 val_set 就不用有交集.
         seed = 2147483647
         train_set = random_split(train_set, train_val_split, generator=torch.Generator().manual_seed(seed))[0]
         val_set = random_split(val_set, train_val_split, generator=torch.Generator().manual_seed(seed))[1]

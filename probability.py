@@ -221,12 +221,15 @@ class DiscretizedGMM(DiscretizedCtsDistribution):
 class DiscretizedNormal(DiscretizedCtsDistribution):
     def __init__(self, params, num_bins, clip=False, min_std_dev=1e-3, max_std_dev=10, min_prob=1e-5, log_dev=True):
         assert params.size(-1) == 2
+        
         if min_std_dev < 0:
             min_std_dev = 1.0 / (num_bins * 5)
+            
         mean, std_dev = params.split(1, -1)[:2]
         if log_dev:
             std_dev = safe_exp(std_dev)
         std_dev = std_dev.clamp(min=min_std_dev, max=max_std_dev)
+        
         super().__init__(
             cts_dist=Normal(mean.squeeze(-1), std_dev.squeeze(-1), validate_args=False),
             num_bins=num_bins,

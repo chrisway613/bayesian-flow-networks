@@ -150,6 +150,7 @@ class FourierImageInputAdapter(nn.Module):
 class OutputAdapter(nn.Module):
     def __init__(self, input_height: int, output_channels: int, output_height: int):
         super().__init__()
+        
         self.output_channels = output_channels
         self.output_height = output_height
         self.output_projection = nn.Linear(

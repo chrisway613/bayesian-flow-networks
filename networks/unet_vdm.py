@@ -125,12 +125,13 @@ class UNetVDM(nn.Module):
     ) -> torch.Tensor:
         flat_x = self.input_adapter(data, t)
         x = flat_x.reshape(flat_x.size(0), self.image_size, self.image_size, self.input_channels)
-        x_perm = x.permute(0, 3, 1, 2).contiguous()
+
         t = t.float().flatten(start_dim=1)[:, 0]
         t_embedding = get_timestep_embedding(t + 0.001, self.embedding_dim)
         # We will condition on time embedding.
         cond = self.embed_conditioning(t_embedding)
 
+        x_perm = x.permute(0, 3, 1, 2).contiguous()
         h = self.maybe_concat_fourier(x_perm)
         h = self.conv_in(h)  # (B, embedding_dim, H, W)
         hs = []

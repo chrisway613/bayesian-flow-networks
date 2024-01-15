@@ -350,68 +350,108 @@ class DiscreteBayesianFlow(BayesianFlow):
         max_sqrt_beta: float = 1,
     ):
         super().__init__()
+        
         self.n_classes = n_classes
-        self.min_sqrt_beta = min_sqrt_beta
-        self.discretize = discretize
         self.epsilon = epsilon
+        
+        # 是否进行离散化操作
+        self.discretize = discretize
+        
+        # \sqrt{\beta} 的下限
+        self.min_sqrt_beta = min_sqrt_beta
+        # \sqrt{\beta(1)}
         self.max_sqrt_beta = max_sqrt_beta
+        
+        # 均匀分布的期望熵
         self.uniform_entropy = math.log(self.n_classes)
 
     def t_to_sqrt_beta(self, t):
+        # sqrt{\beta(t)} = t \sqrt{\beta(1)}
         return t * self.max_sqrt_beta
 
-    def count_dist(self, x, beta=None):
+    def count_dist(self, x, beta=None) -> D.Distribution:
+        """贝叶斯流分布中的期望部分所对应的发送者分布. 精度累加起来变为 beta(t)."""
         mean = (self.n_classes * F.one_hot(x.long(), self.n_classes)) - 1
         std_dev = math.sqrt(self.n_classes)
+        
         if beta is not None:
             mean = mean * beta
             std_dev = std_dev * beta.sqrt()
+            
         return D.Normal(mean, std_dev, validate_args=False)
 
     def count_sample(self, x, beta):
+        """利用重参数化采样技术采样出观测样本作为贝叶斯流分布的 logits 源(下一步将其输入 softmax 以实现后验更新)."""
         return self.count_dist(x, beta).rsample()
 
     @torch.no_grad()
     def get_prior_input_params(self, data_shape: tuple, device: torch.device) -> tuple[Tensor]:
+        """初始先验: 各类别概率相等的均匀分布 U{1, K}."""
+        
+        # 注意返回的是元组, 这是为了与连续/离散化数据的场景保持一致性.
         return (torch.ones(*data_shape, self.n_classes, device=device) / self.n_classes,)
 
     @torch.no_grad()
     def params_to_net_inputs(self, params: tuple[Tensor]) -> Tensor:
         params = params[0]
         if self.n_classes == 2:
+            # 作者使用的 MNIST 数据集是经过二值化处理的, 因此这部分针对 MNIST 操作,
+            # 将模型输入的范围缩放至 [-1,1]
             params = params * 2 - 1  # We scale-shift here for MNIST instead of in the network like for text
+            # 因为总共只有两个类别, 所以取其中一类所对应的概率即可.
             params = params[..., :1]
+            
         return params
 
     def get_alpha(self, i: Union[int, Tensor], n_steps: int) -> Union[float, Tensor]:
+        # 计算离散时间步所对应的精度: \alpha_i = \beta(1) \frac{2i-1}{n^2}
         return ((self.max_sqrt_beta / n_steps) ** 2) * (2 * i - 1)
 
     def get_sender_dist(self, x: Tensor, alpha: Union[float, Tensor], shape=torch.Size([])) -> D.Distribution:
         e_x = F.one_hot(x.long(), self.n_classes)
         alpha = alpha.unsqueeze(-1) if isinstance(alpha, Tensor) else alpha
         dist = D.Normal(alpha * ((self.n_classes * e_x) - 1), (self.n_classes * alpha) ** 0.5)
+        
         return dist
 
     def update_input_params(self, input_params: tuple[Tensor], y: Tensor, alpha: float) -> tuple[Tensor]:
+        """贝叶斯更新函数: 利用贝叶斯定理计算后验."""
+        
         new_input_params = input_params[0] * y.exp()
         new_input_params /= new_input_params.sum(-1, keepdims=True)
+        
+        # 注意返回的是元组
         return (new_input_params,)
 
     @torch.no_grad()
     def forward(self, data: Tensor, t: Tensor) -> tuple[Tensor]:
+        """根据贝叶斯流分布完成后验更新."""
+        
         if self.discretize:
+            # 若要进行离散化操作, 则将数据以对应的离散化区间索引表示.
             data = float_to_idx(data, self.n_classes)
+        
+        # \sqrt{\beta(t)}
         sqrt_beta = self.t_to_sqrt_beta(t.clamp(max=1 - self.epsilon))
         lo_beta = sqrt_beta < self.min_sqrt_beta
         sqrt_beta = sqrt_beta.clamp(min=self.min_sqrt_beta)
+        # \beta(t)
         beta = sqrt_beta.square().unsqueeze(-1)
+        
+        # 从精度参数为 \beta(t) 的发送者分布中采样观测样本以作为贝叶斯流分布的 logits.
         logits = self.count_sample(data, beta)
         probs = F.softmax(logits, -1)
+        # 将精度太小的部分所对应的后验以均匀先验 \frac{1}{K} 代替.
+        # 这是因为精度太小, 那么对应的观测样本也"不靠谱"——所包含真实数据的信息太少,
+        # 将其作为 logits 就不靠谱, 即以此为根据而实现的后验更新意义不大.
         probs = torch.where(lo_beta.unsqueeze(-1), torch.ones_like(probs) / self.n_classes, probs)
         if self.n_classes == 2:
+            # 如果是二分类则只取其中一类的概率即可.
             probs = probs[..., :1]
             probs = probs.reshape_as(data)
+            
         input_params = (probs,)
+        
         return input_params
 
 
@@ -422,6 +462,7 @@ class DiscreteBayesianFlowLoss(Loss):
         distribution_factory: DiscreteDistributionFactory,
     ):
         super().__init__()
+        
         self.bayesian_flow = bayesian_flow
         self.distribution_factory = distribution_factory
         self.K = self.bayesian_flow.n_classes
@@ -429,13 +470,16 @@ class DiscreteBayesianFlowLoss(Loss):
     def cts_time_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor, t) -> Tensor:
         flat_output = sandwich(output_params)
         pred_probs = self.distribution_factory.get_dist(flat_output).probs
+        
         flat_target = data.flatten(start_dim=1)
         if self.bayesian_flow.discretize:
             flat_target = float_to_idx(flat_target, self.K)
+
         tgt_mean = torch.nn.functional.one_hot(flat_target.long(), self.K)
         kl = self.K * ((tgt_mean - pred_probs).square()).sum(-1)
         t = t.flatten(start_dim=1).float()
         loss = t * (self.bayesian_flow.max_sqrt_beta**2) * kl
+        
         return loss
 
     def discrete_time_loss(
@@ -444,25 +488,38 @@ class DiscreteBayesianFlowLoss(Loss):
         flat_target = data.flatten(start_dim=1)
         if self.bayesian_flow.discretize:
             flat_target = float_to_idx(flat_target, self.K)
+        
+        # 根据 t = \frac{i-1}{n} 反过来计算 i 
         i = t * n_steps + 1
+        # \alpha_i
         alpha = self.bayesian_flow.get_alpha(i, n_steps).flatten(start_dim=1)
-        sender_dist = self.bayesian_flow.get_sender_dist(flat_target, alpha)
 
         flat_output = sandwich(output_params)
         receiver_mix_wts = self.distribution_factory.get_dist(flat_output).probs
+        # 这里之所以要在倒数第2个维度上加一维是因为以下 components 在每个类别上的均值向量都是 K 维 one-hot,
+        # 从而在每个类别上生成的是 K 个相互独立的正态分布. 总共有 K 类, 于是就有 K x K 个分布.
+        # 因此这里增加维度是为了让 categorical 权重 与 components 对齐.
         receiver_mix_dist = D.Categorical(probs=receiver_mix_wts.unsqueeze(-2))
+        
         classes = torch.arange(self.K, device=flat_target.device).long().unsqueeze(0).unsqueeze(0)
         receiver_components = self.bayesian_flow.get_sender_dist(classes, alpha.unsqueeze(-1))
+        
         receiver_dist = D.MixtureSameFamily(receiver_mix_dist, receiver_components)
-
+        
+        sender_dist = self.bayesian_flow.get_sender_dist(flat_target, alpha)
+        # 从发送者分布中采样, 以蒙特卡洛方法近似估计其与接收者分布之间的 KL loss
         y = sender_dist.sample(torch.Size([n_samples]))
+        
+        # (B,1)
         loss = n_steps * (sender_dist.log_prob(y) - receiver_dist.log_prob(y)).mean(0).sum(-1).mean(1, keepdims=True)
+        
         return loss
 
     def reconstruction_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor) -> Tensor:
         flat_outputs = sandwich(output_params)
         flat_data = data.flatten(start_dim=1)
         output_dist = self.distribution_factory.get_dist(flat_outputs)
+        
         return -output_dist.log_prob(flat_data)
 
 
@@ -571,6 +628,7 @@ class BFN(nn.Module):
 
         t = torch.ones(*data_shape, device=device)
         output_params = self.net(self.bayesian_flow.params_to_net_inputs(input_params), t)
+        # 概率分布的众数(mode)作为样本.
         output_sample = distribution_factory.get_dist(output_params, input_params, t).mode
         output_sample = output_sample.reshape(*data_shape)
         
