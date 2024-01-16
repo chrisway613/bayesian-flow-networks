@@ -139,7 +139,7 @@ class UNetVDM(nn.Module):
         data: torch.Tensor,
         t: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO
+        # (B,H*W,C)
         flat_x = self.input_adapter(data, t)
         # (B,H,W,C)
         x = flat_x.reshape(flat_x.size(0), self.image_size, self.image_size, self.input_channels)

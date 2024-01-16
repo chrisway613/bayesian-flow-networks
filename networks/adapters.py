@@ -35,24 +35,32 @@ class TextInputAdapter(nn.Module):
         learn_pos_embedding: bool = False,
     ):
         super().__init__()
+        
         self.learn_pos_embedding = learn_pos_embedding
         if learn_pos_embedding:
             self.pos_embedding = nn.Embedding(seq_len, output_size)
         else:
             self.register_buffer("pos_embedding", pe_encode(seq_len, output_size))
+            
         self.inp_embedding = nn.Linear(vocab_size, output_size)
         self.t_embedding = nn.Linear(1, output_size)
 
     def forward(self, probs: torch.Tensor, t: torch.Tensor) -> Tensor:
+        # 将概率值从[0,1]范围缩放至[-1,1]
         inp_emb = self.inp_embedding(2 * probs - 1)
+        
         if self.learn_pos_embedding:
             pos_emb = self.pos_embedding(
                 torch.arange(0, probs.size(1)).to(probs.device)
             )
         else:
             pos_emb = self.pos_embedding
+        # (B,L,output_size)
         pos_emb = pos_emb.unsqueeze(0).expand(inp_emb.size(0), -1, -1)
+        
+        # 同样将时间变量的范围从[0,1]缩放至[-1,1]
         t_emb = self.t_embedding((2 * t - 1).unsqueeze(-1))
+        
         output = inp_emb + pos_emb + t_emb
 
         return output
@@ -85,6 +93,7 @@ class FourierImageInputAdapter(nn.Module):
         self.mask_res = mask_res
         self.add_pos_feats = add_pos_feats
         self.add_mask = add_mask
+        
         if learn_pos_feats:
             pos_feats = nn.Parameter(
                 init_scale
@@ -94,35 +103,52 @@ class FourierImageInputAdapter(nn.Module):
         else:
             x = torch.linspace(-1.0, 1.0, steps=input_shape[0])
             y = torch.linspace(-1.0, 1.0, steps=input_shape[1])
+            # (input_shape[0],input_shape[1])
             x_pos, y_pos = torch.meshgrid(x, y, indexing="ij")
+            # (input_shape[0],input_shape[1],2)
             pos = torch.stack((x_pos, y_pos), dim=-1)
+            # (L=H*W,2)
             pos = pos.reshape(-1, 2)
+            
             x_bands = torch.linspace(1.0, input_shape[0] / 2, steps=n_freq_bands)
             y_bands = torch.linspace(1.0, input_shape[1] / 2, steps=n_freq_bands)
+            # (2,n_freq_bands)
             bands = torch.stack((x_bands, y_bands), dim=0)
+            
+            # (L,2,n_freq_bands)
             vals = pos[:, :, None] * bands[None, :, :]
+            # (L,2*n_freq_bands)
             vals = math.pi * vals.reshape(vals.shape[0], -1)
+            # (L,4*n_freq_bands)
             pos_feats = torch.cat([vals.sin(), vals.cos()], dim=-1)
+            # (L,4*n_freq_bands+2)
             pos_feats = torch.cat([pos_feats, pos], dim=-1)
             self.register_buffer("pos_feats", pos_feats)
+            
         img_feat_height = input_channels
         pos_feat_height = pos_feats.size(-1)
+        
         if self.mask_res > 0:
             mask_feat_height = (n_freq_bands * 2) + 1
         else:
             mask_feat_height = 1
+            
         all_feat_height = img_feat_height
         if add_mask:
             all_feat_height += mask_feat_height
         if add_pos_feats:
             all_feat_height += pos_feat_height
+            
         self.output_projection = None
         if output_height != all_feat_height:
             self.output_projection = nn.Linear(all_feat_height, output_height)
 
     def forward(self, img: Tensor, t: Tensor) -> Tensor:
+        # (B,H*W,C)
         flat_img = sandwich(img)
+        # (B,H*W,C)
         flat_t = sandwich(t)
+        
         t_feats = (flat_t.float()[..., :1] * 2) - 1
         if self.mask_res > 0:
             t_feats = torch.cat(
@@ -134,17 +160,22 @@ class FourierImageInputAdapter(nn.Module):
                 ],
                 -1,
             )
+        
+        # (B, H*W, )
         fourier_feats = self.pos_feats.expand(img.size(0), -1, -1)
+        
         all_feat_list = [flat_img]
         if self.add_mask:
             all_feat_list.append(t_feats)
         if self.add_pos_feats:
             all_feat_list.append(fourier_feats)
         all_feats = torch.cat(all_feat_list, dim=-1)
+        
         if self.output_projection is None:
             output = all_feats
         else:
             output = self.output_projection(all_feats)
+            
         return output
 
 
