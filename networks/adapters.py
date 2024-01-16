@@ -78,6 +78,7 @@ class FourierImageInputAdapter(nn.Module):
         init_scale: float = 0.02,
     ):
         super().__init__()
+        
         self.input_shape = input_shape
         self.n_freq_bands = n_freq_bands
         self.value_res = value_res

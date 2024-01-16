@@ -29,6 +29,7 @@
 # - Added concatenation of input and output of the network before the final projection
 
 import numpy as np
+
 import torch
 from torch import einsum, nn, pi, softmax
 
@@ -38,8 +39,10 @@ from utils_model import sandwich
 @torch.no_grad()
 def zero_init(module: nn.Module) -> nn.Module:
     """Sets to zero all the parameters of a module, and returns the module."""
+    
     for p in module.parameters():
         nn.init.zeros_(p.data)
+        
     return module
 
 
@@ -58,13 +61,16 @@ class UNetVDM(nn.Module):
         image_size: int = 32,
     ):
         super().__init__()
+        
         self.input_adapter = data_adapters["input_adapter"]
         self.output_adapter = data_adapters["output_adapter"]
+        
         attention_params = dict(
             n_heads=n_attention_heads,
             n_channels=embedding_dim,
             norm_groups=norm_groups,
         )
+        
         resnet_params = dict(
             ch_in=embedding_dim,
             ch_out=embedding_dim,
@@ -72,21 +78,28 @@ class UNetVDM(nn.Module):
             dropout_prob=dropout_prob,
             norm_groups=norm_groups,
         )
-        if use_fourier_features:
-            self.fourier_features = FourierFeatures()
+        
+        # 用作将时间变量映射为 conditional embedding.
         self.embed_conditioning = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 4),
             nn.SiLU(),
             nn.Linear(embedding_dim * 4, embedding_dim * 4),
             nn.SiLU(),
         )
+        
         total_input_ch = input_channels
         if use_fourier_features:
+            self.fourier_features = FourierFeatures()
+            # C = (2F + 1)C, 其中 2F 代表傅里叶特征数(sin & cos 各占 F).
+            # 经过傅里叶特征变换所输出的通道数为 2FC, 而这部分特征会和原特征拼接起来,
+            # 于是通道数总共就为 (2F+1)C.
             total_input_ch *= 1 + self.fourier_features.num_features
+            
         self.conv_in = nn.Conv2d(total_input_ch, embedding_dim, 3, padding=1)
 
         # Down path: n_blocks blocks with a resnet block and maybe attention.
         self.down_blocks = nn.ModuleList(
+            # 注意, 实际上并没有下采样, 分辨率保持不变.
             UpDownBlock(
                 resnet_block=ResnetBlock(**resnet_params),
                 attention_block=AttentionBlock(**attention_params) if attention_everywhere else None,
@@ -101,6 +114,7 @@ class UNetVDM(nn.Module):
         # Up path: n_blocks+1 blocks with a resnet block and maybe attention.
         resnet_params["ch_in"] *= 2  # double input channels due to skip connections
         self.up_blocks = nn.ModuleList(
+            # 注意, 实际上并没有上采样, 分辨率保持不变.
             UpDownBlock(
                 resnet_block=ResnetBlock(**resnet_params),
                 attention_block=AttentionBlock(**attention_params) if attention_everywhere else None,
@@ -111,8 +125,10 @@ class UNetVDM(nn.Module):
         self.conv_out = nn.Sequential(
             nn.GroupNorm(num_groups=norm_groups, num_channels=embedding_dim),
             nn.SiLU(),
+            # 将最后的输出卷积层初始化为全0.
             zero_init(nn.Conv2d(embedding_dim, embedding_dim, 3, padding=1)),
         )
+        
         self.embedding_dim = embedding_dim
         self.input_channels = input_channels
         self.image_size = image_size
@@ -123,36 +139,55 @@ class UNetVDM(nn.Module):
         data: torch.Tensor,
         t: torch.Tensor,
     ) -> torch.Tensor:
+        # TODO
         flat_x = self.input_adapter(data, t)
+        # (B,H,W,C)
         x = flat_x.reshape(flat_x.size(0), self.image_size, self.image_size, self.input_channels)
 
+        # (B,) 因为同一个数据样本在各维度上所对应的时间变量一致, 所以只需要取同的样本的其中1个维度即可.
         t = t.float().flatten(start_dim=1)[:, 0]
+        # (B,D) 这里 + 0.001 代表小于 0.001 即看作是起始时刻(因此起始时刻不为0), 与 paper 中的描述一致.
         t_embedding = get_timestep_embedding(t + 0.001, self.embedding_dim)
         # We will condition on time embedding.
+        # (B,4D)
         cond = self.embed_conditioning(t_embedding)
 
+        # (B,C,H,W)
         x_perm = x.permute(0, 3, 1, 2).contiguous()
+        # 若设定了要使用傅里叶特征, 则将傅里叶特征拼接过来.
+        # (B,(2F+1)C,H,W), 其中 2FC 是傅里叶特征变换模块输出的通道数.
         h = self.maybe_concat_fourier(x_perm)
-        h = self.conv_in(h)  # (B, embedding_dim, H, W)
-        hs = []
+        # (B,D,H,W)
+        h = self.conv_in(h)
+        
+        hs = [h]
         for down_block in self.down_blocks:  # n_blocks times
-            hs.append(h)
             h = down_block(h, cond)
-        hs.append(h)
+            hs.append(h)
+        
         h = self.mid_resnet_block_1(h, cond)
         h = self.mid_attn_block(h)
         h = self.mid_resnet_block_2(h, cond)
+        
         for up_block in self.up_blocks:  # n_blocks+1 times
             h = torch.cat([h, hs.pop()], dim=1)
             h = up_block(h, cond)
+        
+        # (B,H*W,D)
+        # 这个最后的卷积层初始化为全0, 因此在参数更新前这个输出特征不起作用,
+        # 于是以下才将网络的输入也一并拼接在一起再输入到最后的 linear projection.
         out = sandwich(self.conv_out(h).permute(0, 2, 3, 1).contiguous())
+        # (B,H*W,C+D)
         out = torch.cat([sandwich(x), out], -1)
+        # (B,H*W,out_channels,out_height)
         out = self.output_adapter(out)
+        
         return out
 
     def maybe_concat_fourier(self, z):
         if self.use_fourier_features:
             return torch.cat([z, self.fourier_features(z)], dim=1)
+        
         return z
 
 
@@ -166,36 +201,49 @@ class ResnetBlock(nn.Module):
         norm_groups=32,
     ):
         super().__init__()
+        
         ch_out = ch_in if ch_out is None else ch_out
+        
         self.ch_out = ch_out
         self.condition_dim = condition_dim
+        
         self.net1 = nn.Sequential(
             nn.GroupNorm(num_groups=norm_groups, num_channels=ch_in),
             nn.SiLU(),
             nn.Conv2d(ch_in, ch_out, kernel_size=3, padding=1),
         )
+        
         if condition_dim is not None:
             self.cond_proj = zero_init(nn.Linear(condition_dim, ch_out, bias=False))
+        
         self.net2 = nn.Sequential(
             nn.GroupNorm(num_groups=norm_groups, num_channels=ch_out),
             nn.SiLU(),
             nn.Dropout(dropout_prob),
             zero_init(nn.Conv2d(ch_out, ch_out, kernel_size=3, padding=1)),
         )
+        
         if ch_in != ch_out:
             self.skip_conv = nn.Conv2d(ch_in, ch_out, kernel_size=1)
 
     def forward(self, x, condition):
         h = self.net1(x)
+        
         if condition is not None:
             assert condition.shape == (x.shape[0], self.condition_dim)
+            
+            # 这个条件映射层(全连接层)初始化为全0, 因此在参数更新前条件变量不起作用.
             condition = self.cond_proj(condition)
+            # (B,D,1,1)
             condition = condition[:, :, None, None]
             h = h + condition
+        
         h = self.net2(h)
+        
         if x.shape[1] != self.ch_out:
             x = self.skip_conv(x)
         assert x.shape == h.shape
+        
         return x + h
 
 
@@ -209,15 +257,20 @@ def get_timestep_embedding(
     # Adapted from tensor2tensor and VDM codebase.
     assert timesteps.ndim == 1
     assert embedding_dim % 2 == 0
-    timesteps *= 1000.0  # In DDPM the time step is in [0, 1000], here [0, 1]
+    
     num_timescales = embedding_dim // 2
+    # num_timescales 个等比元素, 由 1/min_timescale 到 1/max_timescale(包含).
+    # logspace 的底默认为 10, 其输入的前两个参数代表最小和最大的幂.
     inv_timescales = torch.logspace(  # or exp(-linspace(log(min), log(max), n))
         -np.log10(min_timescale),
         -np.log10(max_timescale),
         num_timescales,
         device=timesteps.device,
     )
+    
+    timesteps *= 1000.0  # In DDPM the time step is in [0, 1000], here [0, 1]
     emb = timesteps.to(dtype)[:, None] * inv_timescales[None, :]  # (T, D/2)
+    
     return torch.cat([emb.sin(), emb.cos()], dim=1)  # (T, D)
 
 
@@ -265,6 +318,7 @@ def attention_inner_heads(qkv, num_heads):
     # Split into (q, k, v) of shape (B, H*C, T).
     q, k, v = qkv.chunk(3, dim=1)
 
+    # 对 Q, K 各自缩放 1/d^{1/4} 相当于 Q, K 矩阵相乘后的结果缩放了 1/(\sqrt{d})
     # Rescale q and k. This makes them contiguous in memory.
     scale = ch ** (-1 / 4)  # scale with 4th root = scaling output by sqrt
     q = q * scale
@@ -280,6 +334,7 @@ def attention_inner_heads(qkv, num_heads):
     weight = einsum("bct,bcs->bts", q, k)  # (B*H, T, T)
     weight = softmax(weight.float(), dim=-1).to(weight.dtype)  # (B*H, T, T)
     out = einsum("bts,bcs->bct", weight, v)  # (B*H, C, T)
+    
     return out.reshape(bs, num_heads * ch, length)  # (B, H*C, T)
 
 
@@ -288,14 +343,17 @@ class Attention(nn.Module):
 
     def __init__(self, n_heads):
         super().__init__()
+        
         self.n_heads = n_heads
 
     def forward(self, qkv):
         assert qkv.dim() >= 3, qkv.dim()
         assert qkv.shape[1] % (3 * self.n_heads) == 0
+        
         spatial_dims = qkv.shape[2:]
-        qkv = qkv.view(*qkv.shape[:2], -1)  # (B, 3*H*C, T)
-        out = attention_inner_heads(qkv, self.n_heads)  # (B, H*C, T)
+        qkv = qkv.view(*qkv.shape[:2], -1)  # (B, 3*n_heads*C, T)
+        out = attention_inner_heads(qkv, self.n_heads)  # (B, n_heads*C, T)
+        
         return out.view(*out.shape[:2], *spatial_dims).contiguous()
 
 
@@ -304,11 +362,15 @@ class AttentionBlock(nn.Module):
 
     def __init__(self, n_heads, n_channels, norm_groups):
         super().__init__()
+        
         assert n_channels % n_heads == 0
+        
         self.layers = nn.Sequential(
             nn.GroupNorm(num_groups=norm_groups, num_channels=n_channels),
+            # 之所以将通道数扩展3倍是因为后续要输入到 Attention 模块, 为 Q, K ,V 各分配数量一致的通道数.
             nn.Conv2d(n_channels, 3 * n_channels, kernel_size=1),  # (B, 3 * C, H, W)
             Attention(n_heads),
+            # 输出卷积层初始化为全0，因此在参数更新前这部分输出特征相当于不起作用.
             zero_init(nn.Conv2d(n_channels, n_channels, kernel_size=1)),
         )
 
@@ -319,6 +381,7 @@ class AttentionBlock(nn.Module):
 class UpDownBlock(nn.Module):
     def __init__(self, resnet_block, attention_block=None):
         super().__init__()
+        
         self.resnet_block = resnet_block
         self.attention_block = attention_block
 
@@ -326,4 +389,5 @@ class UpDownBlock(nn.Module):
         x = self.resnet_block(x, cond)
         if self.attention_block is not None:
             x = self.attention_block(x)
+            
         return x
