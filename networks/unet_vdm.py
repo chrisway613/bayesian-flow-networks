@@ -254,13 +254,15 @@ def get_timestep_embedding(
     max_timescale=10_000,
     min_timescale=1,
 ):
+    """正弦位置编码, 相当于将时间变量的值看作是位置."""
+    
     # Adapted from tensor2tensor and VDM codebase.
     assert timesteps.ndim == 1
     assert embedding_dim % 2 == 0
     
     num_timescales = embedding_dim // 2
     # num_timescales 个等比元素, 由 1/min_timescale 到 1/max_timescale(包含).
-    # logspace 的底默认为 10, 其输入的前两个参数代表最小和最大的幂.
+    # logspace 的底默认为 10, 其输入的前两个参数代表最小和最大的幂
     inv_timescales = torch.logspace(  # or exp(-linspace(log(min), log(max), n))
         -np.log10(min_timescale),
         -np.log10(max_timescale),
@@ -271,9 +273,11 @@ def get_timestep_embedding(
     timesteps *= 1000.0  # In DDPM the time step is in [0, 1000], here [0, 1]
     emb = timesteps.to(dtype)[:, None] * inv_timescales[None, :]  # (T, D/2)
     
+    # sin(t * \frac{1}{10000^{i/d}}), cos(t * \frac{1}{10000^{i/d}})
     return torch.cat([emb.sin(), emb.cos()], dim=1)  # (T, D)
 
 
+# TODO
 class FourierFeatures(nn.Module):
     def __init__(self, first=5.0, last=6.0, step=1.0):
         super().__init__()

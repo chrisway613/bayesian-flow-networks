@@ -40,6 +40,7 @@ from utils_model import sandwich
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
+
 """
 Helpers to train with 16-bit precision.
 """
@@ -49,6 +50,7 @@ def convert_module_to_f16(module):
     """
     Convert primitive modules to float16.
     """
+    
     if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
         module.weight.data = module.weight.data.half()
         module.bias.data = module.bias.data.half()
@@ -58,6 +60,7 @@ def convert_module_to_f32(module):
     """
     Convert primitive modules to float32, undoing convert_module_to_f16().
     """
+    
     if isinstance(module, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
         module.weight.data = module.weight.data.float()
         module.bias.data = module.bias.data.float()
@@ -124,12 +127,14 @@ def conv_nd(dims, *args, **kwargs):
     """
     Create a 1D, 2D, or 3D convolution module.
     """
+    
     if dims == 1:
         return nn.Conv1d(*args, **kwargs)
     elif dims == 2:
         return nn.Conv2d(*args, **kwargs)
     elif dims == 3:
         return nn.Conv3d(*args, **kwargs)
+    
     raise ValueError(f"unsupported dimensions: {dims}")
 
 
@@ -144,12 +149,14 @@ def avg_pool_nd(dims, *args, **kwargs):
     """
     Create a 1D, 2D, or 3D average pooling module.
     """
+    
     if dims == 1:
         return nn.AvgPool1d(*args, **kwargs)
     elif dims == 2:
         return nn.AvgPool2d(*args, **kwargs)
     elif dims == 3:
         return nn.AvgPool3d(*args, **kwargs)
+    
     raise ValueError(f"unsupported dimensions: {dims}")
 
 
@@ -172,6 +179,7 @@ def zero_module(module):
     """
     for p in module.parameters():
         p.detach().zero_()
+        
     return module
 
 
@@ -211,14 +219,17 @@ def timestep_embedding(timesteps, dim, max_period=10000):
     :param max_period: controls the minimum frequency of the embeddings.
     :return: an [N x dim] Tensor of positional embeddings.
     """
+    
     half = dim // 2
     freqs = th.exp(-math.log(max_period) * th.arange(start=0, end=half, dtype=th.float32) / half).to(
         device=timesteps.device
     )
     args = timesteps[:, None].float() * freqs[None]
+    
     embedding = th.cat([th.cos(args), th.sin(args)], dim=-1)
     if dim % 2:
         embedding = th.cat([embedding, th.zeros_like(embedding[:, :1])], dim=-1)
+        
     return embedding
 
 
@@ -233,6 +244,7 @@ def checkpoint(func, inputs, params, flag):
                    explicitly take as arguments.
     :param flag: if False, disable gradient checkpointing.
     """
+    
     if flag:
         args = tuple(inputs) + tuple(params)
         return CheckpointFunction.apply(func, len(inputs), *args)
@@ -295,6 +307,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 x = layer(x, emb)
             else:
                 x = layer(x)
+                
         return x
 
 
@@ -310,20 +323,25 @@ class Upsample(nn.Module):
 
     def __init__(self, channels, use_conv, dims=2):
         super().__init__()
+        
         self.channels = channels
         self.use_conv = use_conv
         self.dims = dims
+        
         if use_conv:
             self.conv = conv_nd(dims, channels, channels, 3, padding=1)
 
     def forward(self, x):
         assert x.shape[1] == self.channels
+        
         if self.dims == 3:
             x = F.interpolate(x, (x.shape[2], x.shape[3] * 2, x.shape[4] * 2), mode="nearest")
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
+            
         if self.use_conv:
             x = self.conv(x)
+        
         return x
 
 
@@ -339,9 +357,11 @@ class Downsample(nn.Module):
 
     def __init__(self, channels, use_conv, dims=2):
         super().__init__()
+        
         self.channels = channels
         self.use_conv = use_conv
         self.dims = dims
+        
         stride = 2 if dims != 3 else (1, 2, 2)
         if use_conv:
             self.op = conv_nd(dims, channels, channels, 3, stride=stride, padding=1)
@@ -561,6 +581,7 @@ class UNetModel(nn.Module):
         project_input=False,
     ):
         super().__init__()
+        
         self.input_adapter = data_adapters["input_adapter"]
         self.output_adapter = data_adapters["output_adapter"]
 
@@ -581,11 +602,14 @@ class UNetModel(nn.Module):
         self.num_heads = num_heads
         self.num_heads_upsample = num_heads_upsample
         self.skip = skip
+        
+        # Input projection
         self.project_input = project_input
         if project_input:
             self.input_projection = nn.Linear(self.in_channels, self.model_channels)
             in_channels = self.model_channels
 
+        # Time embedding
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
@@ -593,15 +617,20 @@ class UNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
+        # Class embedding
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
 
         self.input_blocks = nn.ModuleList(
+            # TimestepEmbedSequential 继承自 nn.Sequential, 但其序列中的模块的 forward() 方法可以接收 time embedding 作为第2个输入参数.
             [TimestepEmbedSequential(conv_nd(dims, in_channels, model_channels, 3, padding=1))]
         )
+        
+        # Down-sampling
         input_block_chans = [model_channels]
         ch = model_channels
         ds = 1
+        
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
@@ -615,16 +644,22 @@ class UNetModel(nn.Module):
                         use_scale_shift_norm=use_scale_shift_norm,
                     )
                 ]
+                
                 ch = mult * model_channels
+                
                 if ds in attention_resolutions:
                     layers.append(AttentionBlock(ch, use_checkpoint=use_checkpoint, num_heads=num_heads))
+                
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
                 input_block_chans.append(ch)
+            
+            # 除最后1个 level 外的其它 level 的最后1个 block 都进行下采样.
             if level != len(channel_mult) - 1:
                 self.input_blocks.append(TimestepEmbedSequential(Downsample(ch, conv_resample, dims=dims)))
                 input_block_chans.append(ch)
                 ds *= 2
 
+        # Middle Blocks
         self.middle_block = TimestepEmbedSequential(
             ResBlock(
                 ch,
@@ -645,6 +680,7 @@ class UNetModel(nn.Module):
             ),
         )
 
+        # Up-sampling
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
@@ -659,7 +695,9 @@ class UNetModel(nn.Module):
                         use_scale_shift_norm=use_scale_shift_norm,
                     )
                 ]
+                
                 ch = model_channels * mult
+                
                 if ds in attention_resolutions:
                     layers.append(
                         AttentionBlock(
@@ -668,12 +706,20 @@ class UNetModel(nn.Module):
                             num_heads=num_heads_upsample,
                         )
                     )
+                    
+                # 除第1个 level 以外, 每个 level 的最后一个 block 进行上采样.
                 if level and i == num_res_blocks:
+                    # conv_resample=True 并非代表使用转置卷积来进行上采样,
+                    # 而是上采样之后使用额外多一个卷积层进行映射.
+                    # 至于上采样操作则使用的是最近邻插值.
                     layers.append(Upsample(ch, conv_resample, dims=dims))
                     ds //= 2
+                    
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
 
+        # Output modules
         self.out = nn.Sequential(
+            # GN
             normalization(ch),
             SiLU(),
             zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
@@ -683,6 +729,7 @@ class UNetModel(nn.Module):
         """
         Convert the torso of the model to float16.
         """
+        
         self.input_blocks.apply(convert_module_to_f16)
         self.middle_block.apply(convert_module_to_f16)
         self.output_blocks.apply(convert_module_to_f16)
@@ -691,6 +738,7 @@ class UNetModel(nn.Module):
         """
         Convert the torso of the model to float32.
         """
+        
         self.input_blocks.apply(convert_module_to_f32)
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
@@ -715,37 +763,65 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        
         y = None
-        flat_x = self.input_adapter(data, t)
-        x = flat_x.reshape(flat_x.size(0), self.image_size, self.image_size, self.in_channels)
-        if self.project_input:
-            x = self.input_projection(x)
-        x_perm = x.permute(0, 3, 1, 2).contiguous()
-        timesteps = t.flatten(start_dim=1)[:, 0] * 4000
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
+        
+        
+        '''Input Projection'''
+        
+        flat_x = self.input_adapter(data, t)
+        # (B,H,W,C)
+        x = flat_x.reshape(flat_x.size(0), self.image_size, self.image_size, self.in_channels)
+        if self.project_input:
+            # (B,H,W,D)
+            x = self.input_projection(x)
+        # (B,D,H,W)
+        x_perm = x.permute(0, 3, 1, 2).contiguous()
+        
+        '''Time Embeddings'''
+        
+        # (B,)
+        timesteps = t.flatten(start_dim=1)[:, 0] * 4000
 
-        hs = []
+        # 将时间步经过正弦位置编码后再输入到多个全连接层形成最终的 embeddings.
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
+        '''Donw-Sampling'''
+
+        hs = []
         h = x_perm.type(self.inner_dtype)
         for module in self.input_blocks:
             h = module(h, emb)
             hs.append(h)
+            
+        '''Middle Blocks'''
+        
         h = self.middle_block(h, emb)
+        
+        '''Up-Sampling'''
+        
         for module in self.output_blocks:
             cat_in = th.cat([h, hs.pop()], dim=1)
             h = module(cat_in, emb)
         h = h.type(x.dtype)
+        
+        '''Output Modules'''
+        
+        # (B, H*W, D)
         out = sandwich(self.out(h).permute(0, 2, 3, 1).contiguous())
         if self.skip:
+            # Skip connection
+            # (B, H*W, 2D)
             out = th.cat([sandwich(x), out], -1)
+        # (B, H*W, output_channels, output_height)
         out = self.output_adapter(out)
+        
         return out
 
     def get_feature_vectors(self, x, timesteps, y=None):

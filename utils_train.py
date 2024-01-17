@@ -68,6 +68,12 @@ def worker_init_function(worker_id: int) -> None:
 
 
 def get_generator(seed: int):
+    # TODO: waiting for review
+    # import torch.distributed as dist
+    
+    # rank = dist.get_rank()
+    # seed += rank
+    
     g = torch.Generator()
     g.manual_seed(seed)
     

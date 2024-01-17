@@ -66,6 +66,7 @@ class TextInputAdapter(nn.Module):
         return output
 
 
+# TODO
 class FourierImageInputAdapter(nn.Module):
     """
     A module to convert 2D image coordinates into a set of vectors represented as a matrix, with fourier position codes.
