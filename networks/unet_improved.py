@@ -187,8 +187,10 @@ def scale_module(module, scale):
     """
     Scale the parameters of a module and return it.
     """
+    
     for p in module.parameters():
         p.detach().mul_(scale)
+        
     return module
 
 
@@ -258,28 +260,37 @@ class CheckpointFunction(th.autograd.Function):
         ctx.run_function = run_function
         ctx.input_tensors = list(args[:length])
         ctx.input_params = list(args[length:])
+        
+        # 为了节省显存, 所以此处前向过程不需要梯度.
         with th.no_grad():
             output_tensors = ctx.run_function(*ctx.input_tensors)
+            
         return output_tensors
 
     @staticmethod
     def backward(ctx, *output_grads):
         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+        
+        # 在反向传播时重新进行一次有梯度的前向过程.
         with th.enable_grad():
             # Fixes a bug where the first op in run_function modifies the
             # Tensor storage in place, which is not allowed for detach()'d
             # Tensors.
             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
+            
         input_grads = th.autograd.grad(
             output_tensors,
             ctx.input_tensors + ctx.input_params,
             output_grads,
             allow_unused=True,
         )
+        
         del ctx.input_tensors
         del ctx.input_params
         del output_tensors
+        
+        # 返回的变量数目要和 forward() 中输入的参数数目对齐, 其中每个都对应 forward() 中输入参数的梯度.
         return (None, None) + input_grads
 
 
@@ -400,6 +411,7 @@ class ResBlock(TimestepBlock):
         use_checkpoint=False,
     ):
         super().__init__()
+        
         self.channels = channels
         self.emb_channels = emb_channels
         self.dropout = dropout
@@ -417,6 +429,7 @@ class ResBlock(TimestepBlock):
             SiLU(),
             linear(
                 emb_channels,
+                # 当使用 scale & shift 时, 会将 embedding 分成通道数相等的两部分, 分别用作 scale & shift.
                 2 * self.out_channels if use_scale_shift_norm else self.out_channels,
             ),
         )
@@ -442,6 +455,7 @@ class ResBlock(TimestepBlock):
         :param emb: an [N x emb_channels] Tensor of timestep embeddings.
         :return: an [N x C x ...] Tensor of outputs.
         """
+        
         return checkpoint(self._forward, (x, emb), self.parameters(), self.use_checkpoint)
 
     def _forward(self, x, emb):
@@ -449,6 +463,7 @@ class ResBlock(TimestepBlock):
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
+            
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = th.chunk(emb_out, 2, dim=1)
@@ -457,6 +472,7 @@ class ResBlock(TimestepBlock):
         else:
             h = h + emb_out
             h = self.out_layers(h)
+            
         return self.skip_connection(x) + h
 
 
@@ -470,6 +486,7 @@ class AttentionBlock(nn.Module):
 
     def __init__(self, channels, num_heads=1, use_checkpoint=False):
         super().__init__()
+        
         self.channels = channels
         self.num_heads = num_heads
         self.use_checkpoint = use_checkpoint
@@ -485,11 +502,19 @@ class AttentionBlock(nn.Module):
     def _forward(self, x):
         b, c, *spatial = x.shape
         x = x.reshape(b, c, -1)
+        
+        # (b,3c,h*w)
         qkv = self.qkv(self.norm(x))
+        # (b*h,3c//h,h*w)
         qkv = qkv.reshape(b * self.num_heads, -1, qkv.shape[2])
+        
         h = self.attention(qkv)
+        # (b,c,h*w)
         h = h.reshape(b, -1, h.shape[-1])
+        # (b,c,h*w)
         h = self.proj_out(h)
+        
+        # (b,c,h,w)
         return (x + h).reshape(b, c, *spatial)
 
 
@@ -505,11 +530,15 @@ class QKVAttention(nn.Module):
         :param qkv: an [N x (C * 3) x T] tensor of Qs, Ks, and Vs.
         :return: an [N x C x T] tensor after attention.
         """
+        
         ch = qkv.shape[1] // 3
         q, k, v = th.split(qkv, ch, dim=1)
+        
+        # 将 q,k 都缩放 1/d^{1/4} 相当于 q,k 点乘后的结果缩放 1/d^{1/2}.
         scale = 1 / math.sqrt(math.sqrt(ch))
         weight = th.einsum("bct,bcs->bts", q * scale, k * scale)  # More stable with f16 than dividing afterwards
         weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
+        
         return th.einsum("bts,bcs->bct", weight, v)
 
     @staticmethod
