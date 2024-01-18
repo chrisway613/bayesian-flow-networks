@@ -43,6 +43,7 @@ class LayerNorm(nn.Module):
 
     def __init__(self, ndim, bias):
         super().__init__()
+        
         self.weight = nn.Parameter(torch.ones(ndim))
         self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
@@ -62,7 +63,7 @@ class SelfAttention(nn.Module):
         self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
 
         # regularization
-        self.attn_dropout = nn.Dropout(dropout)
+        # self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
         self.n_head = n_head
         self.n_embd = n_embd
@@ -83,15 +84,16 @@ class SelfAttention(nn.Module):
             q, k, v, dropout_p=self.dropout if self.training else 0, is_causal=self.is_causal
         )
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
-
         # output projection
         y = self.resid_dropout(self.c_proj(y))
+        
         return y
 
 
 class MLP(nn.Module):
     def __init__(self, n_embd, dropout, bias):
         super().__init__()
+        
         self.c_fc = nn.Linear(n_embd, 4 * n_embd, bias=bias)
         self.c_proj = nn.Linear(4 * n_embd, n_embd, bias=bias)
         self.dropout = nn.Dropout(dropout)
@@ -101,12 +103,14 @@ class MLP(nn.Module):
         x = gelu(x)
         x = self.c_proj(x)
         x = self.dropout(x)
+        
         return x
 
 
 class Block(nn.Module):
     def __init__(self, n_head, n_embd, dropout, bias, is_causal):
         super().__init__()
+        
         self.ln_1 = LayerNorm(n_embd, bias=bias)
         self.attn = SelfAttention(n_head, n_embd, dropout, bias, is_causal)
         self.ln_2 = LayerNorm(n_embd, bias=bias)
@@ -115,6 +119,7 @@ class Block(nn.Module):
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
+        
         return x
 
 
@@ -132,12 +137,14 @@ class GPT(nn.Module):
         is_causal: bool = False,
     ):
         super().__init__()
+        
         self.n_layer = n_layer
         self.n_head = n_head
         self.n_embd = n_embd
 
         self.input_adapter = data_adapters["input_adapter"]
         self.output_adapter = data_adapters["output_adapter"]
+        
         self.transformer = nn.ModuleDict(
             dict(
                 drop=nn.Dropout(dropout),
@@ -145,25 +152,28 @@ class GPT(nn.Module):
                 ln_f=LayerNorm(n_embd, bias=bias),
             )
         )
+        
         self.is_causal = is_causal
         if self.is_causal:
             self.skip = False
         else:
             self.skip = skip
+            
         if skip:
+            # Skip=True 会将最后的输出特征与输入特征 concat 起来, 所以这个全连接层的输入通道是 2 * n_embd.
             self.lm_head = nn.Linear(2 * n_embd, vocab_size, bias=bias)
         else:
             self.lm_head = nn.Linear(n_embd, vocab_size, bias=bias)
 
-        # init all weights
+        # Init all weights
         self.apply(self._init_weights)
 
-        # apply special scaled init to the residual projections, per GPT-2 paper
+        # Apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layer))
 
-        # report number of parameters
+        # Report number of parameters
         print(f"number of parameters: {sum(p.numel() for p in self.parameters() if p.requires_grad) / 1e6:.2f}M")
 
     def _init_weights(self, module):
@@ -179,10 +189,13 @@ class GPT(nn.Module):
         x = self.transformer.drop(x_in)
         for block in self.transformer.h:
             x = block(x)
+            
         x = self.transformer.ln_f(x)
         if self.skip:
             x = torch.cat([x, x_in], -1)
+            
         logits = self.output_adapter(self.lm_head(x)) if self.output_adapter else self.lm_head(x)
+        
         return logits
 
     def get_optim_groups(self, weight_decay: float):
