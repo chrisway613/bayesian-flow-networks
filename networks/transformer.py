@@ -35,6 +35,7 @@ import torch.nn.functional as F
 
 
 def gelu(x):
+    # approximate="tanh" 代表使用近似计算. 能够提高计算效率但会损失精度.
     return F.gelu(x, approximate="tanh")
 
 
