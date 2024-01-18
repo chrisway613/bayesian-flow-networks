@@ -223,7 +223,10 @@ class Text8Dataset(Dataset):
                 prepare_text8(data_dir)
             else:
                 raise NotADirectoryError(f"dir {data_dir} does not exist and download is False")
-                
+
+        # memmap() 将磁盘上的大型二进制文件当作内存中的数组进行处理, shape 若未指定, 则返回的数组将是一维的.
+        # order 参数指定数组内存布局的顺序, 可以是 C(行优先) 或 F(列优先), 默认是行优先, 这个参数仅在数组大于1维时有效.
+        # 还支持 offset 参数, 加载的数组数据从此偏移量开始. 偏移量应该是 dtype 的字节大小的倍数, 默认为 0.
         self.data = np.memmap(data_dir / fname, np.uint16, "r")
 
     def __getitem__(self, index) -> torch.Tensor:
