@@ -31,6 +31,7 @@ from torchvision.utils import make_grid
 
 from utils_model import quantize
 
+
 TEXT8_CHARS = list("_abcdefghijklmnopqrstuvwxyz")
 
 
@@ -117,6 +118,7 @@ def make_datasets(cfg: DictConfig) -> tuple[Dataset, Dataset, Dataset]:
         train_set = Text8Dataset(cfg.data_dir, "train", download=True, seq_len=cfg.seq_len)
         val_set = Text8Dataset(cfg.data_dir, "val", download=True, seq_len=cfg.seq_len)
         test_set = Text8Dataset(cfg.data_dir, "test", download=True, seq_len=cfg.seq_len)
+        
     else:
         raise NotImplementedError(cfg.dataset)
 
@@ -138,13 +140,16 @@ def make_datasets(cfg: DictConfig) -> tuple[Dataset, Dataset, Dataset]:
 def prepare_text8(data_dir: pathlib.Path):
     data_dir.mkdir(parents=True, exist_ok=True)
     data_url = "http://mattmahoney.net/dc/text8.zip"
+    
     with open(data_dir / "text8.zip", "wb") as f:
         print("Downloading text8")
         f.write(requests.get(data_url).content)
         print("Done")
+        
     with zipfile.ZipFile(data_dir / "text8.zip") as f:
         f.extractall(data_dir)
     os.remove(data_dir / "text8.zip")
+    
     data = (data_dir / "text8").read_text()
 
     # get all the unique characters that occur in this text
@@ -162,12 +167,16 @@ def prepare_text8(data_dir: pathlib.Path):
 
     # encode both to integers
     n = len(data)
+
+    # List[int]
     train_data = data[: int(n * 0.9)]
     val_data = data[int(n * 0.9) : int(n * 0.95)]
     test_data = data[int(n * 0.95) :]
+    
     train_ids = encode(train_data)
     val_ids = encode(val_data)
     test_ids = encode(test_data)
+    
     print(f"train has {len(train_ids):,} tokens")
     print(f"val has {len(val_ids):,} tokens")
     print(f"test has {len(test_ids):,} tokens")
@@ -176,12 +185,13 @@ def prepare_text8(data_dir: pathlib.Path):
     train_ids = np.array(train_ids, dtype=np.uint16)
     val_ids = np.array(val_ids, dtype=np.uint16)
     test_ids = np.array(test_ids, dtype=np.uint16)
+    
     train_ids.tofile(data_dir / "train.bin")
     val_ids.tofile(data_dir / "val.bin")
     test_ids.tofile(data_dir / "test.bin")
     print(f"Saved to {data_dir / 'train.bin'}, {data_dir / 'val.bin'}, {data_dir / 'test.bin'}")
 
-    # save the meta information as well, to help us encode/decode later
+    # Save the meta information as well, to help us encode/decode later
     meta = {
         "vocab_size": vocab_size,
         "itos": itos,
@@ -199,17 +209,21 @@ class Text8Dataset(Dataset):
         seq_len should include context length. Example: seq_len=512 for modeling 256 chars with 256 char of context.
         context is only used for correct preparation of val/test sets.
         """
-        self.root_dir = pathlib.Path(data_dir)
-        self.split = split
+
         self.seq_len = seq_len
-        fname = {"train": "train.bin", "val": "val.bin", "test": "test.bin"}[self.split]
+        
+        self.split = split
         assert self.split in ["train", "val", "test"]
+        fname = {"train": "train.bin", "val": "val.bin", "test": "test.bin"}[self.split]
+
+        self.root_dir = pathlib.Path(data_dir)
         data_dir = self.root_dir / "text8"
         if not os.path.exists(data_dir):
             if download:
                 prepare_text8(data_dir)
             else:
                 raise NotADirectoryError(f"dir {data_dir} does not exist and download is False")
+                
         self.data = np.memmap(data_dir / fname, np.uint16, "r")
 
     def __getitem__(self, index) -> torch.Tensor:
