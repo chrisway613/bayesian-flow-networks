@@ -218,7 +218,7 @@ class CtsBayesianFlowLoss(Loss):
         
         self.bayesian_flow = bayesian_flow
         self.distribution_factory = distribution_factory
-        # \sigma_1^{2t} 的下限, 以防用作分母时溢出.
+        # \sigma_1^{2} 的下限, 以防用作分母时溢出.
         self.min_loss_variance = min_loss_variance
         # -ln(\sigma_1)
         self.C = -0.5 * math.log(bayesian_flow.min_variance)
@@ -227,13 +227,14 @@ class CtsBayesianFlowLoss(Loss):
         self.noise_pred = noise_pred
         if self.noise_pred:
             self.distribution_factory.log_dev = False
-            # 在预测噪声的情况下, 将预测的噪声分布的参数转换为对应数据分布的参数，从而得到对应的数据分布.
+            # 在预测噪声的情况下, 将预测的噪声((或噪声分布相关的参数))转换为对应数据分布的参数，从而得到对应的数据分布.
             self.distribution_factory = PredDistToDataDistFactory(
                 self.distribution_factory, self.bayesian_flow.min_variance
             )
 
     def cts_time_loss(self, data: Tensor, output_params: Tensor, input_params: Tensor, t) -> Tensor:
-        # reshape
+        # 模型输出
+        # reshape 成3维: (B, -1, D)
         output_params = sandwich(output_params)
         
         t = t.flatten(start_dim=1).float()
@@ -245,13 +246,13 @@ class CtsBayesianFlowLoss(Loss):
             # 做最小值截断, 以防其作分母时防止溢出
             posterior_var = posterior_var.clamp(min=self.min_loss_variance)
         
-        # 接收者分布
+        # 输出分布
         pred_dist = self.distribution_factory.get_dist(output_params, input_params, t)
-        # 接收者分布的均值 E[P(\theta, t)], 作为对真实数据的估计
+        # 输出分布的均值 E[P(\theta, t)]
         pred_mean = pred_dist.mean
         
         mse_loss = (pred_mean - flat_target).square()
-        # 连续时间的损失函数计算公式: -ln(\sigma_1) \sigma_1{-2t} || x - \hat{x}(\theta, t) ||^2
+        # 连续时间的损失函数计算公式: -ln(\sigma_1) \sigma_1{-2t} || x - E[P(\theta, t)] ||^2
         loss = self.C * mse_loss / posterior_var
         
         return loss
