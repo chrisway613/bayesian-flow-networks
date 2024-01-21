@@ -350,8 +350,11 @@ class DiscreteBayesianFlow(BayesianFlow):
         max_sqrt_beta: float = 1,
     ):
         super().__init__()
-        
+
+        # K
         self.n_classes = n_classes
+        # 一个极小值, 用于将传入贝叶斯流分布的时间变量最大值限制至 1-epsilon.
+        # 因为贝叶斯流分布是用于最终时刻前的, 所以需要 t < 1.
         self.epsilon = epsilon
         
         # 是否进行离散化操作
@@ -362,7 +365,7 @@ class DiscreteBayesianFlow(BayesianFlow):
         # \sqrt{\beta(1)}
         self.max_sqrt_beta = max_sqrt_beta
         
-        # 均匀分布的期望熵
+        # 均匀分布的期望熵: H = - \sum_{i=1}^K{p(x_i)ln(p(x_i))}, p(x_i)=\frac{1}{K}.
         self.uniform_entropy = math.log(self.n_classes)
 
     def t_to_sqrt_beta(self, t):
