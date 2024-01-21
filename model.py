@@ -366,22 +366,29 @@ class DiscreteBayesianFlow(BayesianFlow):
         self.uniform_entropy = math.log(self.n_classes)
 
     def t_to_sqrt_beta(self, t):
-        # sqrt{\beta(t)} = t \sqrt{\beta(1)}
+        """计算当前时刻的 accuracy schedule: \beta(t) 的开根:
+           sqrt{\beta(t)} = t \sqrt{\beta(1)}."""
+        
         return t * self.max_sqrt_beta
 
     def count_dist(self, x, beta=None) -> D.Distribution:
-        """贝叶斯流分布中的期望部分所对应的发送者分布. 精度累加起来变为 beta(t)."""
+        """贝叶斯流分布中的期望部分所对应的发送者分布."""
+
+        # Ke_x - 1
         mean = (self.n_classes * F.one_hot(x.long(), self.n_classes)) - 1
+        # \sqrt{K}
         std_dev = math.sqrt(self.n_classes)
         
         if beta is not None:
+            # \beta(t)(Ke_x - 1)
             mean = mean * beta
+            # \sqrt{\beta(t)K}
             std_dev = std_dev * beta.sqrt()
             
         return D.Normal(mean, std_dev, validate_args=False)
 
     def count_sample(self, x, beta):
-        """利用重参数化采样技术采样出观测样本作为贝叶斯流分布的 logits 源(下一步将其输入 softmax 以实现后验更新)."""
+        """利用重参数化采样技术(rsample())采样出观测样本作为贝叶斯流分布的 logits 源(下一步将其输入 softmax 以实现后验更新)."""
         return self.count_dist(x, beta).rsample()
 
     @torch.no_grad()
