@@ -275,6 +275,8 @@ class DiscretizedNormal(DiscretizedCtsDistribution):
             
         mean, std_dev = params.split(1, -1)[:2]
         if log_dev:
+            # 在建模离散化数据时, 模型预测的是噪声分布的对数标准差: ln(\sigma_{\epsilon}),
+            # 因此这里需要去自然指数进行还原.
             std_dev = safe_exp(std_dev)
         std_dev = std_dev.clamp(min=min_std_dev, max=max_std_dev)
         
@@ -282,6 +284,8 @@ class DiscretizedNormal(DiscretizedCtsDistribution):
             cts_dist=Normal(mean.squeeze(-1), std_dev.squeeze(-1), validate_args=False),
             num_bins=num_bins,
             device=params.device,
+            # 注意所谓的 batch dims 并非指数据的 batch size,
+            # 而是除离散化区间数量以外与分布本身关系不大的其它维度.
             batch_dims=params.ndim - 1,
             clip=clip,
             min_prob=min_prob,
