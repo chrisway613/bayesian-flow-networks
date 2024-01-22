@@ -507,9 +507,12 @@ class DiscretizedNormalFactory(DiscreteDistributionFactory):
 def noise_pred_params_to_data_pred_params(noise_pred_params: torch.Tensor, input_mean: torch.Tensor, t: torch.Tensor, min_variance: float, min_t=1e-6):
     """Convert output parameters that predict the noise added to data, to parameters that predict the data.
     将模型预测的噪声分布的参数转换为数据分布的参数."""
-    
+
+    # (B,L,D)
     data_shape = list(noise_pred_params.shape)[:-1]
+    # (B,L*D,NP), NP: num parameters per data
     noise_pred_params = sandwich(noise_pred_params)
+    # (B,L*D)
     input_mean = input_mean.flatten(start_dim=1)
     
     if torch.is_tensor(t):
@@ -517,14 +520,17 @@ def noise_pred_params_to_data_pred_params(noise_pred_params: torch.Tensor, input
     else:
         t = (input_mean * 0) + t
         
+    # (B,L*D,1)
     alpha_mask = (t < min_t).unsqueeze(-1)
     
     # \sigma_1^{2t}
     posterior_var = torch.pow(min_variance, t.clamp(min=min_t))
     # \gamma(t) = 1 - \sigma_1^{2t}
     gamma = 1 - posterior_var
-    
+
+    # \frac{\mu}{\gamma(t)}
     A = (input_mean / gamma).unsqueeze(-1)
+    # \sqrt{\frac{1-\gamma(t)}{\gamma(t)}}
     B = (posterior_var / gamma).sqrt().unsqueeze(-1)
     
     data_pred_params = []
@@ -539,18 +545,26 @@ def noise_pred_params_to_data_pred_params(noise_pred_params: torch.Tensor, input
         assert noise_pred_params.size(-1) % 3 == 0
         mix_wt_logits, noise_pred_mean, noise_pred_log_dev = noise_pred_params.chunk(3, -1)
         data_pred_params.append(mix_wt_logits)
-        
+
+    # 连续数据: x = \frac{\mu}{\gamma(t)} - \sqrt{\frac{1-\gamma(t)}{\gamma(t)}} \epsilon
+    # 离散化数据: \mu_{x} = \frac{\mu}{\gamma(t)} - \sqrt{\frac{1-\gamma(t)}{\gamma(t)}} \mu_{\epsilon}
     data_pred_mean = A - (B * noise_pred_mean)
+    # 时间变量的值过小则被认为是起始时刻, 等同于先验形式, 即标准高斯分布, 于是将预测的均值置0
     data_pred_mean = torch.where(alpha_mask, 0 * data_pred_mean, data_pred_mean)
     data_pred_params.append(data_pred_mean)
     
     if noise_pred_params.size(-1) >= 2:
+        # 将对数标准差取自然指数复原: exp(ln(\sigma_{\epsilon})) -> \sigma_{\epsilon}
         noise_pred_dev = safe_exp(noise_pred_log_dev)
+        # 将噪声分布的标准差转换为目标数据分布的标准差: \sqrt{\frac{1-\gamma(t)}{\gamma(t)}} exp(ln(\sigma_{\epsilon})) -> \mu_x
         data_pred_dev = B * noise_pred_dev
+        # 时间变量的值过小则被认为是起始时刻, 等同于先验形式, 即标准高斯分布, 于是将预测的标准差置1
         data_pred_dev = torch.where(alpha_mask, 1 + (0 * data_pred_dev), data_pred_dev)
         data_pred_params.append(data_pred_dev)
-        
+
+    # (B,L*D,NP)
     data_pred_params = torch.cat(data_pred_params, -1)
+    # (B,L,D,NP)
     data_pred_params = data_pred_params.reshape(data_shape + [-1])
     
     return data_pred_params
@@ -559,6 +573,8 @@ def noise_pred_params_to_data_pred_params(noise_pred_params: torch.Tensor, input
 class PredDistToDataDistFactory(DiscreteDistributionFactory):
     def __init__(self, data_dist_factory, min_variance, min_t=1e-6):
         self.data_dist_factory = data_dist_factory
+        # 之所以设为 False 是因为在以下 noise_pred_params_to_data_pred_params() 方法中会将对数标准差使用自然指数进行转换,
+        # 而无需原数据分布的工厂自行转换.
         self.data_dist_factory.log_dev = False
         self.min_variance = min_variance
         self.min_t = min_t
