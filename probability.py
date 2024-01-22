@@ -87,7 +87,7 @@ class DiscretizedDistribution(DiscreteDistribution):
 
     @functools.cached_property
     def class_boundaries(self):
-        # 各类别之间的边界: [-1 + 2/K, 1 - 2/K]
+        # 各类别之间的边界: [-1 + 2/K, 1 - 2/K], 共 K-1 个.
         return torch.arange(self.bin_width - 1, 1 - self.half_bin_width, self.bin_width, device=self.device)
 
     @functools.cached_property
@@ -109,36 +109,63 @@ class DiscretizedCtsDistribution(DiscretizedDistribution):
     
     def __init__(self, cts_dist, num_bins, device, batch_dims, clip=True, min_prob=1e-5):
         super().__init__(num_bins, device)
-        
+
+        # 原来的连续型分布, 要对其进行离散化处理.
         self.cts_dist = cts_dist
+        # log(2/K)
         self.log_bin_width = log(self.bin_width)
+        # B
         self.batch_dims = batch_dims
+        
+        # 是否要对原来连续型分布的 CDF 做截断.
         self.clip = clip
+        # 用作概率的极小值
         self.min_prob = min_prob
 
     @functools.cached_property
     def probs(self):
+        """计算数据位于各离散区间的概率."""
+        
+        # shape: [K-1] + [1] * B
         bdry_cdfs = self.cts_dist.cdf(self.class_boundaries.reshape([-1] + ([1] * self.batch_dims)))
+        # shape: [1] + [1] * B
         bdry_slice = bdry_cdfs[:1]
         
-        # 先对 CDF 做截断再计算每个区间的概率
         if self.clip:
+            '''对原来连续型分布的 CDF 做截断: 小于第一个区间的左端概率置0、小于等于最后一个区间右端的概率置1.'''
+            
             cdf_min = torch.zeros_like(bdry_slice)
             cdf_max = torch.ones_like(bdry_slice)
+            # shape: [K+1] + [1] * B
             bdry_cdfs = torch.cat([cdf_min, bdry_cdfs, cdf_max], 0)
-            
+
+            # 利用 CDF(k_r) - CDF(k_l) 得到位于各区间的概率.
+            # shape: [1] * B + [K]
             return (bdry_cdfs[1:] - bdry_cdfs[:-1]).moveaxis(0, -1)
-        # 直接先计算各区间概率再按照有效取值范围进行缩放
         else:
+            '''以条件概率的思想来计算数据位于各区间的概率，其中的条件就是数据位于 [-1,1] 取值范围内.
+            先计算原连续型分布在 1 和 -1 处的 CDF 值，将两者作差从而得到位于 [-1,1] 内的概率，以此作为条件对各区间的概率进行缩放.'''
+
+            # CDF(-1)
             cdf_min = self.cts_dist.cdf(torch.zeros_like(bdry_slice) - 1)
+            # CDF(1)
             cdf_max = self.cts_dist.cdf(torch.ones_like(bdry_slice))
+            # shape: [K+1] + [1] * B
             bdry_cdfs = torch.cat([cdf_min, bdry_cdfs, cdf_max], 0)
+
+            # p_{-1 < x <= 1}
             cdf_range = cdf_max - cdf_min
+            # 若 cdf_range 太小，则设置 mask，并将其以1代替，即不对区间的概率进行缩放, 否则会使得计算出来的采样概率非常接近于1.
+            # 两个非常小的值相除, 由于它们都很小、非常接近，因此商接近于1.
             cdf_mask = cdf_range < self.min_prob
             cdf_range = torch.where(cdf_mask, (cdf_range * 0) + 1, cdf_range)
+
+            # shape: [K] + [1] * B
             probs = (bdry_cdfs[1:] - bdry_cdfs[:-1]) / cdf_range
+            # 若整个 cdf_range 太小, 说明各区间的概率差异微不足道, 因此干脆将每个区间的概率都用 1/K 即均等的概率代替.
             probs = torch.where(cdf_mask, (probs * 0) + (1 / self.num_bins), probs)
-            
+
+            # shape: [1] * B + [K]
             return probs.moveaxis(0, -1)
 
     def prob(self, x):
@@ -151,30 +178,35 @@ class DiscretizedCtsDistribution(DiscretizedDistribution):
         # CDF(k_r), 其中 k_r 代表区间右端点.
         cdf_hi = self.cts_dist.cdf(centre + self.half_bin_width)
         
-        # 对原来连续分布的 CDF 做截断, 使得:
-        # CDF(k <= 0) = 0;
-        # CDF(k >= K-1) = 1
         if self.clip:
+            '''对原来连续型分布的 CDF 做截断, 使得:
+            CDF(k <= 0) = 0;
+            CDF(k >= K-1) = 1'''
+            
             cdf_lo = torch.where(class_idx <= 0, torch.zeros_like(centre), cdf_lo)
             cdf_hi = torch.where(class_idx >= (self.num_bins - 1), torch.ones_like(centre), cdf_hi)
             
             return cdf_hi - cdf_lo
         else:
-            # 有效的样本值范围为 [-1, 1], 于是计算对应的有效 CDF 范围.
+            '''以条件概率的思想来计算数据位于某个离散区间内的概率，其中的条件就是数据位于 [-1,1] 取值范围内.
+            先计算原连续型分布在 1 和 -1 处的 CDF 值，将两者作差从而得到位于 [-1,1] 内的概率，以此作为条件对区间的概率进行缩放.'''
+            
             cdf_min = self.cts_dist.cdf(torch.zeros_like(centre) - 1)
             cdf_max = self.cts_dist.cdf(torch.ones_like(centre))
             cdf_range = cdf_max - cdf_min
-            # 若有效 CDF 范围小于预设的最小概率，则设置 mask，并将此范围的概率以1代替，即不进行缩放, 否则会使得计算出来的采样概率非常接近于1.
-            # 试想两个非常小的值相除, 因为它们都很小，非常接近，因此商接近于1.
+            
+            # 若 cdf_range 太小，则设置 mask，并将其以1代替，即不对区间的概率进行缩放, 否则会使得计算出来的采样概率非常接近于1.
+            # 两个非常小的值相除, 由于它们都很小、非常接近，因此商接近于1.
             cdf_mask = cdf_range < self.min_prob
             cdf_range = torch.where(cdf_mask, (cdf_range * 0) + 1, cdf_range)
             prob = (cdf_hi - cdf_lo) / cdf_range
             
-            # 将 mask 部分以均匀采样的概率值即 1/K 代替.
+            # 若整个 cdf_range 太小, 说明各区间的概率差异微不足道, 因此干脆将区间的概率都用 1/K 即均等的概率代替.
             return torch.where(cdf_mask, (prob * 0) + (1 / self.num_bins), prob)
 
     def log_prob(self, x):
         prob = self.prob(x)
+        
         return torch.where(
             prob < self.min_prob,
             # 将 x 以对应区间的中点 k_c 表示并计算出其在原来连续分布中的对数概率密度: log(p(k_c)).
@@ -185,19 +217,26 @@ class DiscretizedCtsDistribution(DiscretizedDistribution):
 
     def sample(self, sample_shape=torch.Size([])):
         if self.clip:
-            # 采取截断的方式, 即直接从原来的连续分布中采样, 然后将其截断至对应的离散化区间.
+            # 直接从原来的连续型分布中采样, 然后将其量化至对应的离散化区间.
+            # 此处, clip 的意思是:
+            # 若小于第一个区间，则以第一个区间中点表示；
+            # 同理，若大于最后一个区间，则以最后一个区间的中点表示.
             return quantize(self.cts_dist.sample(sample_shape), self.num_bins)
         else:
-            # 要求连续分布的 CDF 的反函数存在, 即可以根据概率值逆向求出对应的样本.
+            # 要求原来连续型分布的 CDF 存在反函数, 即可以根据概率值逆向求出对应的样本.
             assert hasattr(self.cts_dist, "icdf")
             
-            # 由于作者将数据归一化至 [-1, 1] 范围内，因此将 CDF 截断至该范围, 
-            # 然后随机抽取该范围内的一个概率值并利用 CDF 的反函数逆向求出对应的样本.
+            # 数据的取值范围是 [-1,1], 先根据原来的连续型分布计算出 CDF(-1) 和 CDF(1),
+            # 然后利用 CDF 的反函数仅在这个 range 内考虑采样.
             cdf_min = self.cts_dist.cdf(torch.zeros_like(self.cts_dist.mean) - 1)
             cdf_max = self.cts_dist.cdf(torch.ones_like(cdf_min))
+
+            # 由于 CDF 是服从均匀分布的, 因此从均匀分布中采样出 CDF 值并利用反函数求出对应样本就等价于从目标分布中采样.
             u = Uniform(cdf_min, cdf_max, validate_args=False).sample(sample_shape)
             cts_samp = self.cts_dist.icdf(u)
-            
+
+            # 最后将样本量化至对应的离散化区间.
+            # 注意, 与前面 clip 的方式不同, 此处在量化前样本已经处于有效的离散化区间内了, 因为采样区间是在[-1,1]内考虑的.
             return quantize(cts_samp, self.num_bins)
 
 
