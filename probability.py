@@ -275,8 +275,7 @@ class DiscretizedNormal(DiscretizedCtsDistribution):
             
         mean, std_dev = params.split(1, -1)[:2]
         if log_dev:
-            # 在建模离散化数据时, 模型预测的是噪声分布的对数标准差: ln(\sigma_{\epsilon}),
-            # 因此这里需要去自然指数进行还原.
+            # 若传入的是对数标准差, 那么此处就需要取自然指数进行还原.
             std_dev = safe_exp(std_dev)
         std_dev = std_dev.clamp(min=min_std_dev, max=max_std_dev)
         
