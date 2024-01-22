@@ -72,28 +72,37 @@ class DiscreteDistribution:
 
 class DiscretizedDistribution(DiscreteDistribution):
     def __init__(self, num_bins, device):
+        # 离散区间数量: K
         self.num_bins = num_bins
+        # 原数据取值范围是[-1,1], 如今划分为 K 个区间, 因此每个区间宽度是 2/K.
         self.bin_width = 2.0 / num_bins
         self.half_bin_width = self.bin_width / 2.0
+
         self.device = device
 
     @functools.cached_property
     def class_centres(self):
+        # 类别中心的取值范围: [-1 + 1/K, 1 - 1/K]
         return torch.arange(self.half_bin_width - 1, 1, self.bin_width, device=self.device)
 
     @functools.cached_property
     def class_boundaries(self):
+        # 各类别之间的边界: [-1 + 2/K, 1 - 2/K]
         return torch.arange(self.bin_width - 1, 1 - self.half_bin_width, self.bin_width, device=self.device)
 
     @functools.cached_property
     def mean(self):
+        # 将各类别中心用它们各自所对应的概率加权求和: \sum_{k=1}^K{p_k * k_c}
         return (self.probs * self.class_centres).sum(-1)
 
     @functools.cached_property
     def mode(self):
+        """概率分布的 mode, 代表众数, 即概率最高处所对应的样本."""
+
+        # 因为 class_centres 是1维的, 所以这里需要将索引展平.
         mode_idx = self.probs.argmax(-1).flatten()
         return self.class_centres[mode_idx].reshape(self.probs.shape[:-1])
-
+        
 
 class DiscretizedCtsDistribution(DiscretizedDistribution):
     """将一个连续型分布离散化."""
