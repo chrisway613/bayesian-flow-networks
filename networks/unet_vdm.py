@@ -61,8 +61,10 @@ class UNetVDM(nn.Module):
         image_size: int = 32,
     ):
         super().__init__()
-        
+
+        # 对输入进行前置处理, 比如加入位置编码.
         self.input_adapter = data_adapters["input_adapter"]
+        # 将输出转换为目标 形式, 通常是将维度数 project 到指定数.
         self.output_adapter = data_adapters["output_adapter"]
         
         attention_params = dict(
@@ -79,7 +81,6 @@ class UNetVDM(nn.Module):
             norm_groups=norm_groups,
         )
         
-        # 用作将时间变量映射为 conditional embedding.
         self.embed_conditioning = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 4),
             nn.SiLU(),
