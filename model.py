@@ -50,14 +50,16 @@ class BayesianFlow(nn.Module, ABC):
         For discrete data, the tuple has length 1 and contains the initial class probabilities.
         For continuous data, the tuple has length 2 and contains the mean and precision.
         
-        返回起始时刻 t=0 的先验参数, 这些参数会作为模型的输入, 这个方法用于采样过程."""
+        返回起始时刻的先验参数, 作为模型的输入, 方法用于采样过程的开端."""
         pass
 
     @abstractmethod
     def params_to_net_inputs(self, params: tuple[Tensor, ...]) -> Tensor:
         """Utility method to convert input distribution params to network inputs if needed.
         
-        如果有必要的话, 将输入分布的参数转换为适合模型输入的形式."""
+        如果有必要的话, 将输入分布的参数转换为适合模型输入的形式.
+        比如在建模离散化数据时, 输入分布的参数代表概率, 取值范围在[0,1], 于是在输入模型前会将其 scale 至[-1,1],
+        从而与其他类型的数据场景兼容, 并且避免让模型永远只接收非负值."""
         pass
 
     @abstractmethod
@@ -66,7 +68,7 @@ class BayesianFlow(nn.Module, ABC):
         a) during sampling, when i and alpha are the same for all samples in the batch.
         b) during discrete time loss computation, when i and alpha are different for samples in the batch.
         
-        计算离散时间步的 \alpha_i, 用于采样过程或离散时间的损失函数. """
+        计算某个离散时间步所对应的精度: \alpha_i = \beta(t_i) - \beta(t_{i-1}), 用于采样过程或离散时间的损失函数. """
         pass
 
     @abstractmethod
@@ -75,7 +77,7 @@ class BayesianFlow(nn.Module, ABC):
         a) during sampling (same alpha for whole batch) to sample from the output distribution produced by the net.
         b) during discrete time loss computation when alpha are different for samples in the batch.
         
-        计算输入分布. """
+        返回指定精度 \alpha 下的输入分布. """
         pass
 
     @abstractmethod
@@ -83,7 +85,7 @@ class BayesianFlow(nn.Module, ABC):
         """Updates the distribution parameters using Bayes' theorem in light of noisy sample y.
         Used during sampling when alpha is the same for the whole batch.
         
-        利用观测样本 y 进行计算出后验, 从而更新先验. """
+        根据贝叶斯定理利用观测样本 y 计算后验, 从而更新先验. """
         pass
 
     @abstractmethod
@@ -93,7 +95,7 @@ class BayesianFlow(nn.Module, ABC):
         For discrete data, the returned tuple has length 1 and contains the class probabilities.
         For continuous data, the returned tuple has length 2 and contains the mean and precision.
         
-        从贝叶斯流分布中采样, 返回采样结果(也就是经过后验更新后的输入分布参数). """
+        从贝叶斯流分布中采样得到后验, 代表对输入分布参数的更新. """
         pass
 
 
