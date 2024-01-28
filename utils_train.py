@@ -31,7 +31,10 @@ except ImportError:
 
 
 import numpy as np
+
 import torch
+import torch.distributed as dist
+
 from accelerate.logging import get_logger
 from omegaconf import OmegaConf, DictConfig
 from rich.progress import Progress, SpinnerColumn, MofNCompleteColumn, TimeElapsedColumn, TextColumn
@@ -68,11 +71,9 @@ def worker_init_function(worker_id: int) -> None:
 
 
 def get_generator(seed: int):
-    # TODO: waiting for review
-    # import torch.distributed as dist
-    
-    # rank = dist.get_rank()
-    # seed += rank
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        seed += rank
     
     g = torch.Generator()
     g.manual_seed(seed)
